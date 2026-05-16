@@ -54,7 +54,7 @@ backend/
   requirements.txt
 
 plugin/hermes-telegram-user/
-  plugin.yaml
+  PLUGIN.yaml
   adapter.py
   README.md
 
