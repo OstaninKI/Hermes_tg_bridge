@@ -4,16 +4,16 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 BACKEND_DIR="$ROOT_DIR/backend"
-DEFAULT_SESSION_PATH="$ROOT_DIR/openclaw_user.session"
+DEFAULT_SESSION_PATH="$ROOT_DIR/hermes_user.session"
 
 usage() {
   echo "Usage: sh create_telethon_session.sh [session_path] [extra auth args...]" >&2
   echo "" >&2
   echo "Phone+code auth (default):" >&2
-  echo "  sh create_telethon_session.sh ~/.openclaw/telethon/openclaw_user.session --print-session-string" >&2
+  echo "  sh create_telethon_session.sh ~/.hermes/telethon/hermes_user.session --print-session-string" >&2
   echo "" >&2
   echo "QR code auth:" >&2
-  echo "  sh create_telethon_session.sh ~/.openclaw/telethon/openclaw_user.session --use-qr [--listen 127.0.0.1:8767]" >&2
+  echo "  sh create_telethon_session.sh ~/.hermes/telethon/hermes_user.session --use-qr [--listen 127.0.0.1:8767]" >&2
   echo "" >&2
   echo "With --use-qr the script starts a local HTTP server on 127.0.0.1:8767 (configurable via --listen)." >&2
   echo "The setup skill (or any HTTP client) polls GET /qr to fetch the QR code and GET /status to check progress." >&2
@@ -64,7 +64,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/openclaw-tg-auth.XXXXXX")
+  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hermes-tg-auth.XXXXXX")
   VENV_DIR="$TEMP_DIR/.venv"
   CREATED_VENV=1
   python3 -m venv "$VENV_DIR"
