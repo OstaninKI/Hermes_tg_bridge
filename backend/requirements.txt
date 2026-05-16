@@ -1,0 +1,5 @@
+telethon>=1.43.2,<1.44
+fastapi>=0.115.0,<1
+uvicorn[standard]>=0.30.0,<1
+pydantic>=2.0,<3
+qrcode[pil]>=7.4
