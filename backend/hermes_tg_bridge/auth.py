@@ -21,7 +21,7 @@ def _prompt(prompt: str, default: str | None = None, secret: bool = False) -> st
 
 
 def resolve_local_session_file(session_path: str | None) -> Path:
-    resolved = resolve_session_path(session_path or "./openclaw_user")
+    resolved = resolve_session_path(session_path or "./hermes_user")
     if resolved is None:
         raise ValueError("Session path is required")
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -71,7 +71,7 @@ def main(
         sys.exit(1)
 
     if session_path is None:
-        session_path = _prompt("Session file path (e.g. ./openclaw_user)", default="./openclaw_user")
+        session_path = _prompt("Session file path (e.g. ./hermes_user)", default="./hermes_user")
     session_file = resolve_local_session_file(session_path)
     session_name = str(session_file.with_suffix(""))  # Telethon adds .session
 
@@ -127,7 +127,7 @@ def main(
 
 def cli(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Create a Telegram session locally for Hermes")
-    parser.add_argument("--session-path", default=None, help="Session file path (default: ./openclaw_user)")
+    parser.add_argument("--session-path", default=None, help="Session file path (default: ./hermes_user)")
     parser.add_argument("--api-id", default=None, help="Telegram API ID (or use TELEGRAM_API_ID)")
     parser.add_argument("--api-hash", default=None, help="Telegram API hash (or use TELEGRAM_API_HASH)")
     parser.add_argument("--phone", default=None, help="Telegram phone number (or use TELEGRAM_PHONE)")

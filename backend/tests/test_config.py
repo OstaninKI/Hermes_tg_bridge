@@ -1,13 +1,16 @@
 """Tests for configuration helpers and policy profiles."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hermes_tg_bridge.auth import resolve_local_session_file, write_session_string
 from hermes_tg_bridge.config import (
     PolicyStore,
+    load_config,
     parse_request_overrides,
     resolve_effective_policy,
     resolve_session_path,
@@ -16,16 +19,16 @@ from hermes_tg_bridge.config import (
 
 class TestConfigHelpers(unittest.TestCase):
     def test_resolve_session_path_adds_suffix(self) -> None:
-        resolved = resolve_session_path("~/telegram/openclaw_user")
+        resolved = resolve_session_path("~/telegram/hermes_user")
         self.assertIsNotNone(resolved)
         self.assertEqual(resolved.suffix, ".session")
 
-    def test_parse_request_overrides_is_case_insensitive(self) -> None:
+    def test_parse_request_overrides_accepts_hermes_headers(self) -> None:
         overrides = parse_request_overrides(
             {
                 "X-Hermes-Policy-Profile": "owner",
                 "X-Hermes-Reply-Delay-Sec": "2.5",
-                "x-openclaw-reply-delay-max-sec": "4",
+                "x-hermes-reply-delay-max-sec": "4",
                 "X-Hermes-Allow-From": "@User,-1001",
                 "X-Hermes-Deny-From": "spam",
                 "X-Hermes-Write-To": "@allowed",
@@ -47,9 +50,22 @@ class TestConfigHelpers(unittest.TestCase):
 
     def test_resolve_local_session_file_creates_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            session_file = resolve_local_session_file(f"{temp_dir}/nested/openclaw_user")
+            session_file = resolve_local_session_file(f"{temp_dir}/nested/hermes_user")
             self.assertTrue(session_file.parent.exists())
             self.assertEqual(session_file.suffix, ".session")
+
+    def test_load_config_defaults_to_hermes_state_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True), patch(
+                "hermes_tg_bridge.config.Path.home", return_value=Path(temp_dir)
+            ):
+                config = load_config()
+
+        expected_root = Path(temp_dir) / ".hermes" / "telethon"
+        self.assertEqual(config["sources_inventory_path"], str(expected_root / "sources_inventory.json"))
+        self.assertEqual(config["inbox_state_path"], str(expected_root / "dm_inbox_state.json"))
+        self.assertEqual(config["dm_media_path"], str(expected_root / "dm_inbox_media"))
+        self.assertEqual(config["lock_path"], str(expected_root / "bridge.lock"))
 
     def test_write_session_string_writes_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

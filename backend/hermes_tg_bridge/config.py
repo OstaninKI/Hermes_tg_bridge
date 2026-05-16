@@ -5,13 +5,13 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-HEADER_POLICY_PROFILE = "x-openclaw-policy-profile"
-HEADER_REPLY_DELAY_SEC = "x-openclaw-reply-delay-sec"
-HEADER_REPLY_DELAY_MAX_SEC = "x-openclaw-reply-delay-max-sec"
-HEADER_ALLOW_FROM = "x-openclaw-allow-from"
-HEADER_DENY_FROM = "x-openclaw-deny-from"
-HEADER_WRITE_TO = "x-openclaw-write-to"
-HEADER_DENY_WRITE_TO = "x-openclaw-deny-write-to"
+HEADER_POLICY_PROFILE = "x-hermes-policy-profile"
+HEADER_REPLY_DELAY_SEC = "x-hermes-reply-delay-sec"
+HEADER_REPLY_DELAY_MAX_SEC = "x-hermes-reply-delay-max-sec"
+HEADER_ALLOW_FROM = "x-hermes-allow-from"
+HEADER_DENY_FROM = "x-hermes-deny-from"
+HEADER_WRITE_TO = "x-hermes-write-to"
+HEADER_DENY_WRITE_TO = "x-hermes-deny-write-to"
 
 
 def _get_int(key: str, default: int | None = None) -> int | None:
@@ -105,7 +105,7 @@ def load_config() -> dict[str, Any]:
     default_state_dir = (
         Path(policy_path).expanduser().resolve().parent
         if policy_path
-        else (Path.home() / ".openclaw" / "telethon")
+        else (Path.home() / ".hermes" / "telethon")
     )
     sources_inventory_path = os.environ.get("TELEGRAM_SOURCES_INVENTORY_PATH", "").strip()
     inbox_state_path = os.environ.get("TELEGRAM_INBOX_STATE_PATH", "").strip()

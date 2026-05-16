@@ -276,8 +276,8 @@ def main_qr(
 
     if session_path is None:
         session_path = (
-            input("Session file path (e.g. ./openclaw_user) [./openclaw_user] ").strip()
-            or "./openclaw_user"
+            input("Session file path (e.g. ./hermes_user) [./hermes_user] ").strip()
+            or "./hermes_user"
         )
 
     session_file = resolve_local_session_file(session_path)
@@ -373,7 +373,7 @@ def cli_qr(argv: list[str] | None = None) -> None:
         description="Create a Telegram session via QR code for Hermes"
     )
     parser.add_argument(
-        "--session-path", default=None, help="Session file path (default: ./openclaw_user)"
+        "--session-path", default=None, help="Session file path (default: ./hermes_user)"
     )
     parser.add_argument(
         "--api-id", default=None, help="Telegram API ID (or use TELEGRAM_API_ID env var)"
