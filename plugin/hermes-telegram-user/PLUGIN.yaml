@@ -1,0 +1,7 @@
+name: hermes-telegram-user
+version: 0.1.0
+description: Live Telegram user-account gateway for Hermes Agent
+kind: platform
+entry_point: adapter.py
+platforms:
+  - telegram_user
