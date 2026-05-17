@@ -314,3 +314,7 @@ class TelegramUserAdapter:
         adapter = cls(config)
         ctx.register_platform(cls.platform_name, adapter)
         return adapter
+
+
+def register(ctx: Any) -> TelegramUserAdapter:
+    return TelegramUserAdapter.register(ctx)
