@@ -1,6 +1,6 @@
 # Hermes Telegram Bridge
 
-Это новый Hermes bridge для Telegram user account. Он не выполняет автоматическую миграцию из старой OpenClaw-сессии или state в `~/.openclaw`. Если вы переносите существующую сессию или state, задайте пути к ним явно через env `TELEGRAM_BRIDGE_POLICY_PATH`, `TELEGRAM_BRIDGE_CONFIG_PATH` и связанные service paths, а не рассчитывайте на автообнаружение.
+Это новый Hermes bridge для Telegram user account. Он не выполняет автоматическую миграцию из старой OpenClaw-сессии или state в `~/.openclaw`. Если вы переносите существующую сессию или state, задайте пути к ним явно через env `TELEGRAM_SESSION_PATH`, `TELEGRAM_POLICY_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_DM_MEDIA_PATH` и `TELEGRAM_LOCK_PATH`, а не рассчитывайте на автообнаружение.
 
 ## Что входит
 

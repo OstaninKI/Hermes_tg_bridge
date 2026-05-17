@@ -86,8 +86,6 @@ class AdapterConfig:
         def pick_token(fallback: Any = None) -> Any:
             if "HERMES_TG_BRIDGE_API_TOKEN" in os.environ:
                 return os.environ["HERMES_TG_BRIDGE_API_TOKEN"]
-            if "HERMES_TG_API_TOKEN" in os.environ:
-                return os.environ["HERMES_TG_API_TOKEN"]
             if "api_token" in extra:
                 return extra["api_token"]
             return fallback
