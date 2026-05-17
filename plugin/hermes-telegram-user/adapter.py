@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Any, Iterable
+from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
@@ -50,10 +50,10 @@ class AdapterConfig:
     bridge_url: str = "http://127.0.0.1:8765"
     api_token: str = ""
     policy_profile: str = "dm_inbox"
-    allow_from: tuple[str, ...] = ()
-    deny_from: tuple[str, ...] = ()
-    write_to: tuple[str, ...] = ()
-    deny_write_to: tuple[str, ...] = ()
+    allow_from: list[str] = field(default_factory=list)
+    deny_from: list[str] = field(default_factory=list)
+    write_to: list[str] = field(default_factory=list)
+    deny_write_to: list[str] = field(default_factory=list)
     allow_all_users: bool = False
     mark_read_on_inbound: bool = True
     typing_while_replying: bool = True
@@ -64,35 +64,55 @@ class AdapterConfig:
     def from_env_and_extra(cls, extra: dict[str, Any] | None = None) -> "AdapterConfig":
         extra = extra or {}
 
-        def pick(name: str, fallback: Any = None) -> Any:
-            env_name = f"HERMES_TG_{name}"
+        def pick(env_suffix: str, extra_key: str, fallback: Any = None) -> Any:
+            env_name = f"HERMES_TG_{env_suffix}"
             if env_name in os.environ:
                 return os.environ[env_name]
-            return extra.get(name.lower(), extra.get(name, fallback))
+            if extra_key in extra:
+                return extra[extra_key]
+            return fallback
 
-        allow_from = _list(pick("ALLOWED_USERS", extra.get("allow_from", extra.get("allowed_users"))))
-        write_to_raw = pick("WRITE_TO", extra.get("write_to"))
-        write_to = _list(write_to_raw) if write_to_raw is not None else list(allow_from)
+        def pick_any(env_suffix: str, extra_keys: list[str], fallback: Any = None) -> Any:
+            env_name = f"HERMES_TG_{env_suffix}"
+            if env_name in os.environ:
+                return os.environ[env_name]
+            for key in extra_keys:
+                if key in extra:
+                    return extra[key]
+            return fallback
+
+        def pick_token(fallback: Any = None) -> Any:
+            if "HERMES_TG_BRIDGE_API_TOKEN" in os.environ:
+                return os.environ["HERMES_TG_BRIDGE_API_TOKEN"]
+            if "HERMES_TG_API_TOKEN" in os.environ:
+                return os.environ["HERMES_TG_API_TOKEN"]
+            if "api_token" in extra:
+                return extra["api_token"]
+            return fallback
+
+        allow_from = _list(pick_any("ALLOWED_USERS", ["allow_from", "allowed_users"]))
+        write_to_raw = pick("WRITE_TO", "write_to")
+        write_to = _list(write_to_raw) if write_to_raw is not None else allow_from
 
         return cls(
-            bridge_url=str(pick("BRIDGE_URL", cls.bridge_url)),
-            api_token=str(pick("API_TOKEN", cls.api_token)),
-            policy_profile=str(pick("POLICY_PROFILE", cls.policy_profile)),
-            allow_from=tuple(allow_from),
-            deny_from=tuple(_list(pick("DENY_FROM", extra.get("deny_from")))),
-            write_to=tuple(write_to if write_to else allow_from),
-            deny_write_to=tuple(_list(pick("DENY_WRITE_TO", extra.get("deny_write_to")))),
-            allow_all_users=_bool(pick("ALLOW_ALL_USERS", extra.get("allow_all_users")), cls.allow_all_users),
+            bridge_url=str(pick("BRIDGE_URL", "bridge_url", cls.bridge_url)).rstrip("/"),
+            api_token=str(pick_token(cls.api_token)),
+            policy_profile=str(pick("POLICY_PROFILE", "policy_profile", cls.policy_profile)),
+            allow_from=allow_from,
+            deny_from=_list(pick("DENY_FROM", "deny_from")),
+            write_to=write_to if write_to else allow_from,
+            deny_write_to=_list(pick("DENY_WRITE_TO", "deny_write_to")),
+            allow_all_users=_bool(pick("ALLOW_ALL_USERS", "allow_all_users"), cls.allow_all_users),
             mark_read_on_inbound=_bool(
-                pick("MARK_READ_ON_INBOUND", extra.get("mark_read_on_inbound")),
+                pick("MARK_READ_ON_INBOUND", "mark_read_on_inbound"),
                 cls.mark_read_on_inbound,
             ),
             typing_while_replying=_bool(
-                pick("TYPING_WHILE_REPLYING", extra.get("typing_while_replying")),
+                pick("TYPING_WHILE_REPLYING", "typing_while_replying"),
                 cls.typing_while_replying,
             ),
-            poll_timeout_ms=_int(pick("POLL_TIMEOUT_MS", extra.get("poll_timeout_ms")), cls.poll_timeout_ms),
-            poll_interval_ms=_int(pick("POLL_INTERVAL_MS", extra.get("poll_interval_ms")), cls.poll_interval_ms),
+            poll_timeout_ms=_int(pick("POLL_TIMEOUT_MS", "poll_timeout_ms"), cls.poll_timeout_ms),
+            poll_interval_ms=_int(pick("POLL_INTERVAL_MS", "poll_interval_ms"), cls.poll_interval_ms),
         )
 
 
@@ -116,4 +136,3 @@ class BridgeClient:
             timeout=(config.poll_timeout_ms / 1000.0) + 5.0,
             headers=build_policy_headers(config),
         )
-
