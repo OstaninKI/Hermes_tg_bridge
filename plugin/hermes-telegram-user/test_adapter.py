@@ -1,9 +1,11 @@
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 
-from adapter import AdapterConfig, BridgeClient, build_policy_headers
+from adapter import AdapterConfig, BridgeClient, TelegramUserAdapter, build_policy_headers
 
 
 def _make_bridge_client(handler, config: AdapterConfig | None = None):
@@ -174,3 +176,123 @@ def test_send_typing_posts_sender_payload():
     assert seen["path"] == "/dm/typing"
     assert seen["body"] == {"sender_id": 77, "sender_username": "bot"}
     assert seen["headers"]["authorization"] == "Bearer token"
+
+
+def test_event_to_message_event_shape():
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=None,
+    )
+
+    message = adapter.event_to_message(
+        {
+            "id": 11,
+            "sender_id": "123",
+            "sender_name": "Alice",
+            "sender_username": "alice",
+            "text": "hello",
+            "date": "2026-05-17T10:00:00Z",
+        }
+    )
+
+    assert message == {
+        "platform": "telegram_user",
+        "chat_id": "123",
+        "chat_type": "dm",
+        "user_id": "123",
+        "user_name": "Alice",
+        "content": "hello",
+        "metadata": {
+            "telegram_message_id": 11,
+            "sender_username": "alice",
+        },
+    }
+
+
+def test_event_to_message_uses_media_marker_when_text_empty():
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=None,
+    )
+
+    message = adapter.event_to_message(
+        {
+            "id": 12,
+            "sender_id": "123",
+            "sender_name": "Alice",
+            "sender_username": "alice",
+            "text": "",
+            "has_media": True,
+            "media_type": "MessageMediaPhoto",
+            "date": "2026-05-17T10:00:00Z",
+        }
+    )
+
+    assert message["content"] == "[Telegram media: MessageMediaPhoto]"
+
+
+def test_handle_inbound_event_dispatches_then_acks_and_reads():
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def ack(self, event):
+            self.calls.append(("ack", event["id"]))
+
+        async def mark_read(self, event):
+            self.calls.append(("read", event["id"]))
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=RecordingBridge(),
+    )
+    seen_messages: list[dict[str, object]] = []
+
+    async def handle_message(message):
+        seen_messages.append(message)
+
+    adapter.handle_message = handle_message
+
+    asyncio.run(
+        adapter._handle_inbound_event(
+            {
+                "id": 13,
+                "sender_id": "123",
+                "sender_name": "Alice",
+                "sender_username": "alice",
+                "text": "hello",
+                "date": "2026-05-17T10:00:00Z",
+            }
+        )
+    )
+
+    assert seen_messages[0]["content"] == "hello"
+    assert adapter.bridge.calls == [("ack", 13), ("read", 13)]
+
+
+def test_send_returns_success_result():
+    bridge = SimpleNamespace(send_message=AsyncMock(return_value={"id": 77}))
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=bridge,
+    )
+
+    result = asyncio.run(adapter.send("123", "hello", reply_to="11", metadata={"sender_username": "alice"}))
+
+    assert result == {"success": True, "message_id": 77, "error": None}
+    bridge.send_message.assert_awaited_once_with("123", "hello", 11)
+
+
+def test_send_returns_failure_result():
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    bridge = SimpleNamespace(send_message=boom)
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=bridge,
+    )
+
+    result = asyncio.run(adapter.send("123", "hello"))
+
+    assert result == {"success": False, "message_id": None, "error": "boom"}

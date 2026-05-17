@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -195,3 +197,120 @@ class BridgeClient:
         )
         response.raise_for_status()
         return response.json()
+
+
+class TelegramUserAdapter:
+    platform_name = "telegram_user"
+
+    def __init__(self, config: AdapterConfig, bridge: Any | None = None) -> None:
+        self.config = config
+        self.bridge = bridge or BridgeClient(config)
+        self._running = False
+        self._poll_task: asyncio.Task[Any] | None = None
+
+    def event_to_message(self, event: dict[str, Any]) -> dict[str, Any]:
+        text = str(event.get("text") or "")
+        if not text and event.get("has_media"):
+            media_type = event.get("media_type") or "unknown"
+            text = f"[Telegram media: {media_type}]"
+
+        sender_id = str(event.get("sender_id", ""))
+        sender_name = event.get("sender_name")
+        sender_username = event.get("sender_username")
+
+        return {
+            "platform": self.platform_name,
+            "chat_id": sender_id,
+            "chat_type": "dm",
+            "user_id": sender_id,
+            "user_name": sender_name,
+            "content": text,
+            "metadata": {
+                "telegram_message_id": int(event["id"]),
+                "sender_username": sender_username,
+            },
+        }
+
+    async def connect(self) -> None:
+        await self.bridge.health()
+        self._running = True
+        self._poll_task = asyncio.create_task(self._poll_loop())
+
+    async def disconnect(self) -> None:
+        self._running = False
+        poll_task = self._poll_task
+        self._poll_task = None
+        if poll_task is not None:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
+        close = getattr(self.bridge, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    async def _poll_loop(self) -> None:
+        delay = max(self.config.poll_interval_ms / 1000.0, 0.1)
+        bounded_delay = min(delay, 5.0)
+        while self._running:
+            try:
+                events = await self.bridge.poll_inbox()
+                for event in events:
+                    await self._handle_inbound_event(event)
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(bounded_delay)
+
+    async def _handle_inbound_event(self, event: dict[str, Any]) -> None:
+        message = self.event_to_message(event)
+        handler = getattr(self, "handle_message", None)
+        if handler is not None:
+            result = handler(message)
+            if inspect.isawaitable(result):
+                await result
+        await self.bridge.ack(event)
+        if self.config.mark_read_on_inbound:
+            await self.bridge.mark_read(event)
+
+    async def send(
+        self,
+        chat_id: Any,
+        content: str,
+        reply_to: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            payload = await self.bridge.send_message(
+                chat_id,
+                content,
+                int(reply_to) if reply_to is not None and reply_to != "" else None,
+            )
+            message_id = None
+            if isinstance(payload, dict):
+                message_id = payload.get("message_id")
+                if message_id is None:
+                    message_id = payload.get("id")
+            return {"success": True, "message_id": message_id, "error": None}
+        except Exception as exc:
+            return {"success": False, "message_id": None, "error": str(exc)}
+
+    async def send_typing(self, chat_id: Any, metadata: dict[str, Any] | None = None) -> Any:
+        sender_username = metadata.get("sender_username") if metadata else None
+        return await self.bridge.send_typing(chat_id, sender_username)
+
+    @classmethod
+    def register(cls, ctx: Any) -> "TelegramUserAdapter":
+        extra: dict[str, Any] = {}
+        if isinstance(getattr(ctx, "extra", None), dict):
+            extra = ctx.extra
+        elif isinstance(getattr(ctx, "config", None), dict):
+            extra = ctx.config
+        config = AdapterConfig.from_env_and_extra(extra)
+        adapter = cls(config)
+        ctx.register_platform(cls.platform_name, adapter)
+        return adapter
