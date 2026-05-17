@@ -1,0 +1,25 @@
+bridge:
+  url: "http://127.0.0.1:8765"
+  api_token: "replace-with-the-same-token-as-the-backend"
+  policy_profile: "dm_inbox"
+
+plugins:
+  enabled:
+    - hermes-telegram-user
+
+gateway:
+  platforms:
+    telegram_user:
+      enabled: true
+      extra:
+        bridge_url: "http://127.0.0.1:8765"
+        policy_profile: "dm_inbox"
+        allowed_users:
+          - "123456789"
+        write_to:
+          - "123456789"
+        allow_all_users: false
+        mark_read_on_inbound: true
+        typing_while_replying: true
+        poll_timeout_ms: 25000
+        poll_interval_ms: 1500

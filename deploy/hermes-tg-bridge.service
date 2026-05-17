@@ -1,0 +1,25 @@
+[Unit]
+Description=Hermes Telegram Bridge backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-tg-bridge/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=HERMES_TG_BRIDGE_API_TOKEN=replace-with-a-long-random-token
+Environment=TELEGRAM_BRIDGE_POLICY_PATH=/etc/hermes-tg-bridge/policy.json
+Environment=TELEGRAM_BRIDGE_CONFIG_PATH=/etc/hermes-tg-bridge/config.yaml
+ExecStart=/opt/hermes-tg-bridge/backend/.venv/bin/hermes-tg-bridge
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-tg-bridge /etc/hermes-tg-bridge
+
+[Install]
+WantedBy=multi-user.target
