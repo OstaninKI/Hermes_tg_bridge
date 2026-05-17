@@ -131,8 +131,67 @@ def build_policy_headers(config: AdapterConfig) -> dict[str, str]:
 class BridgeClient:
     def __init__(self, config: AdapterConfig) -> None:
         self.config = config
+        self.headers = build_policy_headers(config)
         self.client = httpx.AsyncClient(
             base_url=config.bridge_url,
             timeout=(config.poll_timeout_ms / 1000.0) + 5.0,
-            headers=build_policy_headers(config),
+            headers=self.headers,
         )
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    async def health(self) -> Any:
+        response = await self.client.get("/health", headers=self.headers)
+        response.raise_for_status()
+        return response.json()
+
+    async def poll_inbox(self, limit: int = 10) -> list[Any]:
+        response = await self.client.get(
+            "/dm/inbox/poll",
+            params={"timeout_ms": self.config.poll_timeout_ms, "limit": limit},
+            headers=self.headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            events = payload.get("events", [])
+            return events if isinstance(events, list) else []
+        return []
+
+    async def send_message(self, peer: Any, text: str, reply_to: Any | None = None) -> Any:
+        response = await self.client.post(
+            "/send_message",
+            json={"peer": peer, "text": text, "reply_to": reply_to},
+            headers=self.headers,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def ack(self, event: dict[str, Any]) -> Any:
+        return await self._post_dm_state("/dm/inbox/ack", event)
+
+    async def mark_read(self, event: dict[str, Any]) -> Any:
+        return await self._post_dm_state("/dm/read", event)
+
+    async def send_typing(self, sender_id: Any, sender_username: Any | None = None) -> Any:
+        response = await self.client.post(
+            "/dm/typing",
+            json={"sender_id": sender_id, "sender_username": sender_username},
+            headers=self.headers,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _post_dm_state(self, path: str, event: dict[str, Any]) -> Any:
+        response = await self.client.post(
+            path,
+            json={
+                "sender_id": str(event["sender_id"]),
+                "sender_username": event.get("sender_username"),
+                "message_id": int(event["id"]),
+            },
+            headers=self.headers,
+        )
+        response.raise_for_status()
+        return response.json()
