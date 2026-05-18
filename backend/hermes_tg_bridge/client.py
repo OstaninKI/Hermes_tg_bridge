@@ -662,6 +662,23 @@ def _require_self_write(scope: BridgeScope, *, detail: str) -> None:
         raise BridgeForbiddenError(detail)
 
 
+def _normalize_path_roots(roots: Iterable[str] | None) -> tuple[Path, ...]:
+    normalized: list[Path] = []
+    for root in roots or []:
+        root_text = str(root or "").strip()
+        if root_text:
+            normalized.append(Path(root_text).expanduser().resolve())
+    return tuple(normalized)
+
+
+def _is_path_inside(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _extract_flood_wait_seconds(exc: BaseException) -> int | None:
     seconds = getattr(exc, "seconds", None)
     if isinstance(seconds, int):
@@ -773,6 +790,8 @@ class BridgeClient:
         write_deny_chat_ids: list[str] | None = None,
         rpc_timeout_sec: float = 30.0,
         flood_wait_max_sleep_sec: float = 3.0,
+        allowed_file_roots: list[str] | None = None,
+        media_download_root: str | None = None,
     ) -> None:
         self._client = client
         self._policy = build_policy(
@@ -788,6 +807,9 @@ class BridgeClient:
         self._flood_wait_max_sleep_sec = max(0.0, flood_wait_max_sleep_sec)
         self._observed_peer_entities: OrderedDict[str, Any] = OrderedDict()
         self._is_premium: bool | None = None
+        self._allowed_file_roots = _normalize_path_roots(allowed_file_roots)
+        media_root = str(media_download_root or "").strip()
+        self._media_download_root = Path(media_root).expanduser().resolve() if media_root else None
 
     @property
     def client(self) -> TelegramClient:
@@ -801,6 +823,45 @@ class BridgeClient:
         if delay_max is not None and delay_max > policy.reply_delay_sec:
             return random.uniform(policy.reply_delay_sec, delay_max)
         return policy.reply_delay_sec
+
+    def _resolve_upload_path(self, file_path: str) -> str:
+        file_path = str(file_path or "").strip()
+        if not file_path:
+            raise BridgeValidationError("file_path is required.")
+        path = Path(file_path).expanduser()
+        if not path.exists() or not path.is_file():
+            raise BridgeValidationError("File does not exist on the backend host.")
+        resolved = path.resolve()
+        if not self._allowed_file_roots:
+            raise BridgeForbiddenError("File uploads must be inside configured allowed upload roots.")
+        if not any(_is_path_inside(resolved, root) for root in self._allowed_file_roots):
+            raise BridgeForbiddenError("File uploads must be inside configured allowed upload roots.")
+        return str(resolved)
+
+    def _resolve_download_target(self, output_path: str | None) -> str:
+        if self._media_download_root is None:
+            raise BridgeForbiddenError("Media downloads require a configured download root.")
+        if output_path is None:
+            self._media_download_root.mkdir(parents=True, exist_ok=True)
+            return str(self._media_download_root)
+        output_text = str(output_path or "").strip()
+        if not output_text:
+            raise BridgeValidationError("output_path must not be empty.")
+        resolved = Path(output_text).expanduser().resolve()
+        if not _is_path_inside(resolved, self._media_download_root):
+            raise BridgeForbiddenError("Media download output must be inside the configured download root.")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+
+    def _resolve_inbox_download_target(self, output_path: str) -> str:
+        output_text = str(output_path or "").strip()
+        if not output_text:
+            raise BridgeValidationError("output_path is required.")
+        resolved = Path(output_text).expanduser().resolve()
+        if self._media_download_root is not None and not _is_path_inside(resolved, self._media_download_root):
+            raise BridgeForbiddenError("Media download output must be inside the configured download root.")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
 
     async def _is_connected(self) -> bool:
         connected = self._client.is_connected()
@@ -1055,11 +1116,7 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing backend-host files is not allowed for this profile.")
-        file_path = str(file_path or "").strip()
-        if not file_path:
-            raise BridgeValidationError("file_path is required.")
-        if not Path(file_path).exists():
-            raise BridgeValidationError("File does not exist on the backend host.")
+        file_path = self._resolve_upload_path(file_path)
         async with self._send_lock:
             entity, _ = await self._resolve_scoped_entity(
                 peer,
@@ -1103,11 +1160,7 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing backend-host files is not allowed for this profile.")
-        file_path = str(file_path or "").strip()
-        if not file_path:
-            raise BridgeValidationError("file_path is required.")
-        if not Path(file_path).exists():
-            raise BridgeValidationError("File does not exist on the backend host.")
+        file_path = self._resolve_upload_path(file_path)
         async with self._send_lock:
             entity, _ = await self._resolve_scoped_entity(
                 peer,
@@ -1135,11 +1188,7 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing backend-host files is not allowed for this profile.")
-        file_path = str(file_path or "").strip()
-        if not file_path:
-            raise BridgeValidationError("file_path is required.")
-        if not Path(file_path).exists():
-            raise BridgeValidationError("File does not exist on the backend host.")
+        file_path = self._resolve_upload_path(file_path)
         async with self._send_lock:
             entity, _ = await self._resolve_scoped_entity(
                 peer,
@@ -1421,6 +1470,7 @@ class BridgeClient:
         _require_self_write(policy.write_scope, detail="Downloading media to the backend host is not allowed for this profile.")
         if message_id < 1:
             raise BridgeValidationError("message_id must be >= 1.")
+        output_path = self._resolve_download_target(output_path)
         entity, _ = await self._resolve_scoped_entity(
             peer,
             action="reading",
@@ -1463,6 +1513,7 @@ class BridgeClient:
         policy = self._resolve_policy(policy_overrides)
         if message_id < 1:
             raise BridgeValidationError("message_id must be >= 1.")
+        output_path = self._resolve_inbox_download_target(output_path)
         entity, _ = await self._resolve_scoped_entity(
             peer,
             action="reading",
@@ -2084,8 +2135,18 @@ class BridgeClient:
         )
         return {"ok": True, "folder_id": folder_id}
 
-    async def resolve_username(self, username: str) -> dict[str, Any]:
-        entity = await self._resolve_entity(username, action="resolve username")
+    async def resolve_username(
+        self,
+        username: str,
+        *,
+        policy_overrides: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        policy = self._resolve_policy(policy_overrides)
+        entity, _ = await self._resolve_scoped_entity(
+            username,
+            action="resolve username",
+            scope=policy.read_scope,
+        )
         return {
             "id": getattr(entity, "id", None),
             "username": getattr(entity, "username", None),
@@ -2093,8 +2154,18 @@ class BridgeClient:
             "type": _resolve_chat_type(entity),
         }
 
-    async def get_user_status(self, peer: str | int) -> dict[str, Any]:
-        entity = await self._resolve_entity(peer, action="read user status")
+    async def get_user_status(
+        self,
+        peer: str | int,
+        *,
+        policy_overrides: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        policy = self._resolve_policy(policy_overrides)
+        entity, _ = await self._resolve_scoped_entity(
+            peer,
+            action="read user status",
+            scope=policy.read_scope,
+        )
         status = getattr(entity, "status", None)
         payload = {
             "id": getattr(entity, "id", None),

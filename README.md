@@ -52,8 +52,6 @@ python3 -m hermes_tg_bridge.auth_qr
 - `HERMES_TG_BRIDGE_URL`
 - `HERMES_TG_BRIDGE_API_TOKEN`
 - `HERMES_TG_POLICY_PROFILE`
-- `HERMES_TG_ALLOWED_USERS`
-- `HERMES_TG_ALLOW_ALL_USERS`
 - `HERMES_TG_MARK_READ_ON_INBOUND`
 - `HERMES_TG_TYPING_WHILE_REPLYING`
 - `HERMES_TG_POLL_TIMEOUT_MS`
@@ -70,8 +68,11 @@ python3 -m hermes_tg_bridge.auth_qr
 
 - backend binds only to `127.0.0.1`;
 - API token обязателен для deployed setup;
-- write allowlist пуст по умолчанию;
-- `allow_all_users` выключен;
+- read/write allowlists задаются только в backend policy, а не в plugin config;
 - `mark_read_on_inbound` включен только если это ожидаемое поведение;
 - Telegram session/state хранится в выделенной service-owned директории;
 - policy должен явно ограничивать read/write peers.
+
+## Extended API
+
+Backend реализует дополнительные операции Telegram, выходящие за пределы scope gateway (отправка файлов/голоса/стикеров/локации, редактирование/удаление/пересылка сообщений, управление контактами и источниками). Все эти endpoints защищены Bearer auth и backend policy. Это реализованные, но не входящие в core gateway scope операции, указанные в spec как "Deferred Work". Их можно отключить, установив env `TELEGRAM_DISABLE_EXTENDED_API=1`.

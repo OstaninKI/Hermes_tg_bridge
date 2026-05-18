@@ -1,7 +1,39 @@
 name: hermes-telegram-user
+label: Telegram User
 version: 0.1.0
 description: Live Telegram user-account gateway for Hermes Agent
 kind: platform
+author: OstaninKI
 entry_point: adapter.py
 platforms:
   - telegram_user
+requires_env:
+  - name: HERMES_TG_BRIDGE_API_TOKEN
+    description: Bearer token shared with the hermes-tg-bridge backend
+    prompt: Bridge API token
+    password: true
+optional_env:
+  - name: HERMES_TG_BRIDGE_URL
+    description: Backend URL, defaults to http://127.0.0.1:8765
+    prompt: Bridge URL
+    password: false
+  - name: HERMES_TG_POLICY_PROFILE
+    description: Backend policy profile, defaults to dm_inbox
+    prompt: Policy profile
+    password: false
+  - name: HERMES_TG_MARK_READ_ON_INBOUND
+    description: Mark Telegram DMs as read after Hermes accepts them
+    prompt: Mark read on inbound
+    password: false
+  - name: HERMES_TG_TYPING_WHILE_REPLYING
+    description: Send Telegram typing status while Hermes is replying
+    prompt: Typing while replying
+    password: false
+  - name: HERMES_TG_POLL_TIMEOUT_MS
+    description: Long-poll timeout in milliseconds
+    prompt: Poll timeout ms
+    password: false
+  - name: HERMES_TG_POLL_INTERVAL_MS
+    description: Delay between inbox polls in milliseconds
+    prompt: Poll interval ms
+    password: false

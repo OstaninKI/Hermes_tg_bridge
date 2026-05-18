@@ -1,11 +1,22 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from adapter import AdapterConfig, BridgeClient, TelegramUserAdapter, build_policy_headers
+from adapter import (
+    AdapterConfig,
+    BasePlatformAdapter,
+    BridgeClient,
+    MessageEvent,
+    MessageType,
+    PlatformConfig,
+    SendResult,
+    TelegramUserAdapter,
+    build_policy_headers,
+    register,
+)
 
 
 def _make_bridge_client(handler, config: AdapterConfig | None = None):
@@ -64,6 +75,25 @@ def test_extra_config_used_when_env_missing(monkeypatch):
 
 
 def test_build_policy_headers():
+    config = AdapterConfig(
+        api_token="token",
+        allow_from=[],
+        deny_from=[],
+        write_to=[],
+        deny_write_to=[],
+    )
+
+    headers = build_policy_headers(config)
+
+    assert headers["Authorization"] == "Bearer token"
+    assert headers["X-Hermes-Policy-Profile"] == "dm_inbox"
+    assert "X-Hermes-Allow-From" not in headers
+    assert "X-Hermes-Deny-From" not in headers
+    assert "X-Hermes-Write-To" not in headers
+    assert "X-Hermes-Deny-Write-To" not in headers
+
+
+def test_build_policy_headers_includes_lists():
     config = AdapterConfig(
         api_token="token",
         allow_from=["alice", "bob"],
@@ -195,18 +225,16 @@ def test_event_to_message_event_shape():
         }
     )
 
-    assert message == {
-        "platform": "telegram_user",
-        "chat_id": "123",
-        "chat_type": "dm",
-        "user_id": "123",
-        "user_name": "Alice",
-        "content": "hello",
-        "metadata": {
-            "telegram_message_id": 11,
-            "sender_username": "alice",
-        },
-    }
+    assert isinstance(message, MessageEvent)
+    assert message.text == "hello"
+    assert message.message_type == MessageType.TEXT
+    assert message.message_id == "11"
+    assert message.raw_message["sender_username"] == "alice"
+    assert message.source.chat_id == "123"
+    assert message.source.chat_name == "Alice"
+    assert message.source.chat_type == "dm"
+    assert message.source.user_id == "123"
+    assert message.source.user_name == "Alice"
 
 
 def test_event_to_message_uses_media_marker_when_text_empty():
@@ -228,7 +256,7 @@ def test_event_to_message_uses_media_marker_when_text_empty():
         }
     )
 
-    assert message["content"] == "[Telegram media: MessageMediaPhoto]"
+    assert message.text == "[Telegram media: MessageMediaPhoto]"
 
 
 def test_handle_inbound_event_dispatches_then_acks_and_reads():
@@ -246,12 +274,12 @@ def test_handle_inbound_event_dispatches_then_acks_and_reads():
         AdapterConfig(allow_from=["123"], write_to=["123"]),
         bridge=RecordingBridge(),
     )
-    seen_messages: list[dict[str, object]] = []
+    seen_messages: list[MessageEvent] = []
 
     async def handle_message(message):
         seen_messages.append(message)
 
-    adapter.handle_message = handle_message
+    adapter._message_handler = handle_message
 
     asyncio.run(
         adapter._handle_inbound_event(
@@ -266,7 +294,8 @@ def test_handle_inbound_event_dispatches_then_acks_and_reads():
         )
     )
 
-    assert seen_messages[0]["content"] == "hello"
+    assert seen_messages[0].text == "hello"
+    assert seen_messages[0].source.chat_id == "123"
     assert adapter.bridge.calls == [("ack", 13), ("read", 13)]
 
 
@@ -279,7 +308,10 @@ def test_send_returns_success_result():
 
     result = asyncio.run(adapter.send("123", "hello", reply_to="11", metadata={"sender_username": "alice"}))
 
-    assert result == {"success": True, "message_id": 77, "error": None}
+    assert isinstance(result, SendResult)
+    assert result.success is True
+    assert result.message_id == "77"
+    assert result.error is None
     bridge.send_message.assert_awaited_once_with("123", "hello", 11)
 
 
@@ -295,4 +327,194 @@ def test_send_returns_failure_result():
 
     result = asyncio.run(adapter.send("123", "hello"))
 
-    assert result == {"success": False, "message_id": None, "error": "boom"}
+    assert isinstance(result, SendResult)
+    assert result.success is False
+    assert result.message_id is None
+    assert result.error == "boom"
+
+
+def test_adapter_extends_hermes_base_adapter():
+    adapter = TelegramUserAdapter(
+        PlatformConfig(extra={"api_token": "token", "bridge_url": "http://bridge.test"}),
+        bridge=SimpleNamespace(),
+    )
+
+    assert isinstance(adapter, BasePlatformAdapter)
+    assert str(adapter.platform) == "telegram_user"
+    assert adapter.adapter_config.api_token == "token"
+
+
+def test_register_uses_hermes_plugin_registry_contract():
+    seen = {}
+
+    class Ctx:
+        def register_platform(self, **kwargs):
+            seen.update(kwargs)
+            return "registered"
+
+    result = register(Ctx())
+
+    assert result == "registered"
+    assert seen["name"] == "telegram_user"
+    assert seen["label"] == "Telegram User"
+    assert callable(seen["adapter_factory"])
+    assert callable(seen["check_fn"])
+    assert callable(seen["validate_config"])
+    assert "HERMES_TG_BRIDGE_API_TOKEN" in seen["required_env"]
+
+    adapter = seen["adapter_factory"](
+        PlatformConfig(extra={"api_token": "token", "bridge_url": "http://bridge.test"})
+    )
+    assert isinstance(adapter, TelegramUserAdapter)
+    assert adapter.adapter_config.bridge_url == "http://bridge.test"
+
+
+def test_poll_loop_401_sets_fatal_and_exits():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.HTTPStatusError("Unauthorized", request=request, response=httpx.Response(401))
+
+    config = AdapterConfig(
+        bridge_url="http://bridge.test",
+        api_token="token",
+    )
+    bridge = _make_bridge_client(handler, config)
+    adapter = TelegramUserAdapter(config, bridge=bridge)
+    adapter._mark_connected()
+
+    asyncio.run(adapter._poll_loop())
+
+    assert adapter._fatal_error_code == "bridge_unauthorized"
+    assert adapter.is_connected is False
+
+
+class _Status429Bridge:
+    def __init__(self, retry_after: str | None) -> None:
+        self.retry_after = retry_after
+        self.calls = 0
+
+    async def poll_inbox(self, limit: int = 10):
+        self.calls += 1
+        request = httpx.Request("GET", "http://bridge.test/dm/inbox/poll")
+        response = httpx.Response(429, request=request)
+        if self.retry_after is not None:
+            response.headers["Retry-After"] = self.retry_after
+        raise httpx.HTTPStatusError("Too Many Requests", request=request, response=response)
+
+
+def test_poll_loop_429_respects_retry_after():
+    sleep_calls: list[float] = []
+
+    async def mock_sleep(duration):
+        sleep_calls.append(duration)
+        adapter._running = False
+
+    config = AdapterConfig(bridge_url="http://bridge.test", api_token="token")
+    adapter = TelegramUserAdapter(config, bridge=_Status429Bridge("3"))
+    adapter._mark_connected()
+
+    with patch("asyncio.sleep", side_effect=mock_sleep):
+        asyncio.run(adapter._poll_loop())
+
+    assert any(call == 3 for call in sleep_calls), f"Expected 3s sleep, got {sleep_calls}"
+
+
+def test_poll_loop_429_invalid_retry_after_falls_back():
+    sleep_calls: list[float] = []
+
+    async def mock_sleep(duration):
+        sleep_calls.append(duration)
+        adapter._running = False
+
+    config = AdapterConfig(bridge_url="http://bridge.test", api_token="token", poll_interval_ms=1500)
+    adapter = TelegramUserAdapter(config, bridge=_Status429Bridge("bogus"))
+    adapter._mark_connected()
+
+    with patch("asyncio.sleep", side_effect=mock_sleep):
+        asyncio.run(adapter._poll_loop())
+
+    bounded_delay = min(max(1500 / 1000.0, 0.1), 5.0)
+    assert any(call == bounded_delay for call in sleep_calls), f"Expected {bounded_delay}s sleep, got {sleep_calls}"
+
+
+def test_allow_from_filters_unknown_sender():
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def ack(self, event):
+            self.calls.append(("ack", event["id"]))
+
+        async def mark_read(self, event):
+            self.calls.append(("read", event["id"]))
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(
+            allow_from=["999"],
+            write_to=["999"],
+            allow_all_users=False,
+        ),
+        bridge=RecordingBridge(),
+    )
+    seen_messages: list[MessageEvent] = []
+
+    async def handle_message(message):
+        seen_messages.append(message)
+
+    adapter._message_handler = handle_message
+
+    asyncio.run(
+        adapter._handle_inbound_event(
+            {
+                "id": 1,
+                "sender_id": "111",
+                "sender_name": "Unknown",
+                "sender_username": "unknown",
+                "text": "hello",
+            }
+        )
+    )
+
+    assert len(seen_messages) == 0
+    assert len(adapter.bridge.calls) == 0
+
+
+def test_allow_all_users_bypasses_filter():
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def ack(self, event):
+            self.calls.append(("ack", event["id"]))
+
+        async def mark_read(self, event):
+            self.calls.append(("read", event["id"]))
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(
+            allow_from=["999"],
+            write_to=["999"],
+            allow_all_users=True,
+        ),
+        bridge=RecordingBridge(),
+    )
+    seen_messages: list[MessageEvent] = []
+
+    async def handle_message(message):
+        seen_messages.append(message)
+
+    adapter._message_handler = handle_message
+
+    asyncio.run(
+        adapter._handle_inbound_event(
+            {
+                "id": 2,
+                "sender_id": "111",
+                "sender_name": "Unknown",
+                "sender_username": "unknown",
+                "text": "hello",
+            }
+        )
+    )
+
+    assert len(seen_messages) == 1
+    assert len(adapter.bridge.calls) == 2

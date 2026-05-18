@@ -9,17 +9,32 @@ User=hermes
 Group=hermes
 WorkingDirectory=/opt/hermes-tg-bridge/backend
 Environment=PYTHONUNBUFFERED=1
-Environment=HERMES_TG_BRIDGE_API_TOKEN=replace-with-a-long-random-token
-Environment=TELEGRAM_BRIDGE_POLICY_PATH=/etc/hermes-tg-bridge/policy.json
+# Load secret token from file (must be mode 0600 with TELEGRAM_BRIDGE_API_TOKEN=...)
+EnvironmentFile=-/etc/hermes-tg-bridge/secret.env
+Environment=TELEGRAM_POLICY_PATH=/etc/hermes-tg-bridge/policy.json
 Environment=TELEGRAM_BRIDGE_CONFIG_PATH=/etc/hermes-tg-bridge/config.yaml
-ExecStart=/opt/hermes-tg-bridge/backend/.venv/bin/hermes-tg-bridge
+ExecStart=/opt/hermes-tg-bridge/backend/.venv/bin/hermes-tg-bridge run
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+PrivateDevices=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
 ReadWritePaths=/var/lib/hermes-tg-bridge /etc/hermes-tg-bridge
+DynamicUser=false
 
 [Install]
 WantedBy=multi-user.target

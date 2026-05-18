@@ -67,8 +67,8 @@ def _parse_float(raw: str, key: str) -> float:
         raise ValueError(f"Invalid {key}: {raw!r}") from exc
 
 
-def _parse_list_header(raw: str) -> list[str]:
-    raw = raw.strip()
+def _parse_id_list(raw: str) -> list[str]:
+    """Parse comma-separated list of IDs/usernames, strip whitespace, drop empties."""
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
@@ -110,6 +110,7 @@ def load_config() -> dict[str, Any]:
     sources_inventory_path = os.environ.get("TELEGRAM_SOURCES_INVENTORY_PATH", "").strip()
     inbox_state_path = os.environ.get("TELEGRAM_INBOX_STATE_PATH", "").strip()
     dm_media_path = os.environ.get("TELEGRAM_DM_MEDIA_PATH", "").strip()
+    file_upload_roots = _list_from_env("TELEGRAM_FILE_UPLOAD_ROOTS")
     dm_auto_download_media = _get_bool("TELEGRAM_DM_AUTO_DOWNLOAD_MEDIA", True)
     lock_path = os.environ.get("TELEGRAM_LOCK_PATH", "").strip()
     sources_refresh_sec = _get_float("TELEGRAM_SOURCES_REFRESH_SEC") or 300.0
@@ -128,6 +129,10 @@ def load_config() -> dict[str, Any]:
         secret = os.environ.get("TELEGRAM_PROXY_SECRET", "00000000000000000000000000000000").strip()
         if host and port:
             proxy = ("mtproxy", host, port, secret)
+
+    resolved_dm_media_path = dm_media_path or str(default_state_dir / "dm_inbox_media")
+    if not file_upload_roots:
+        file_upload_roots = [resolved_dm_media_path]
 
     return {
         "api_id": api_id,
@@ -149,7 +154,8 @@ def load_config() -> dict[str, Any]:
         "policy_default_profile": policy_default_profile or None,
         "sources_inventory_path": sources_inventory_path or str(default_state_dir / "sources_inventory.json"),
         "inbox_state_path": inbox_state_path or str(default_state_dir / "dm_inbox_state.json"),
-        "dm_media_path": dm_media_path or str(default_state_dir / "dm_inbox_media"),
+        "dm_media_path": resolved_dm_media_path,
+        "file_upload_roots": file_upload_roots,
         "dm_auto_download_media": dm_auto_download_media,
         "lock_path": lock_path or str(default_state_dir / "bridge.lock"),
         "sources_refresh_sec": max(0.0, sources_refresh_sec),
@@ -220,10 +226,10 @@ def parse_request_overrides(headers: Mapping[str, str]) -> dict[str, Any]:
     policy_profile = _get_header(headers, HEADER_POLICY_PROFILE)
     reply_delay_raw = _get_header(headers, HEADER_REPLY_DELAY_SEC)
     reply_delay_max_raw = _get_header(headers, HEADER_REPLY_DELAY_MAX_SEC)
-    allow_raw = _get_header(headers, HEADER_ALLOW_FROM)
-    deny_raw = _get_header(headers, HEADER_DENY_FROM)
-    write_allow_raw = _get_header(headers, HEADER_WRITE_TO)
-    write_deny_raw = _get_header(headers, HEADER_DENY_WRITE_TO)
+    allow_from_raw = _get_header(headers, HEADER_ALLOW_FROM)
+    deny_from_raw = _get_header(headers, HEADER_DENY_FROM)
+    write_to_raw = _get_header(headers, HEADER_WRITE_TO)
+    deny_write_to_raw = _get_header(headers, HEADER_DENY_WRITE_TO)
 
     overrides: dict[str, Any] = {}
     if policy_profile is not None:
@@ -232,14 +238,14 @@ def parse_request_overrides(headers: Mapping[str, str]) -> dict[str, Any]:
         overrides["reply_delay_sec"] = max(0.0, _parse_float(reply_delay_raw, "reply delay"))
     if reply_delay_max_raw is not None:
         overrides["reply_delay_max_sec"] = max(0.0, _parse_float(reply_delay_max_raw, "reply delay max"))
-    if allow_raw is not None:
-        overrides["read_allow_chat_ids"] = _parse_list_header(allow_raw)
-    if deny_raw is not None:
-        overrides["read_deny_chat_ids"] = _parse_list_header(deny_raw)
-    if write_allow_raw is not None:
-        overrides["write_allow_chat_ids"] = _parse_list_header(write_allow_raw)
-    if write_deny_raw is not None:
-        overrides["write_deny_chat_ids"] = _parse_list_header(write_deny_raw)
+    if allow_from_raw is not None:
+        overrides["read_allow_from"] = _parse_id_list(allow_from_raw)
+    if deny_from_raw is not None:
+        overrides["read_deny_from"] = _parse_id_list(deny_from_raw)
+    if write_to_raw is not None:
+        overrides["write_allow_to"] = _parse_id_list(write_to_raw)
+    if deny_write_to_raw is not None:
+        overrides["write_deny_to"] = _parse_id_list(deny_write_to_raw)
     return overrides
 
 
@@ -305,12 +311,24 @@ def resolve_effective_policy(
     for key in (
         "reply_delay_sec",
         "reply_delay_max_sec",
-        "read_allow_chat_ids",
-        "read_deny_chat_ids",
-        "write_allow_chat_ids",
-        "write_deny_chat_ids",
     ):
         if key in request_overrides:
             merged[key] = request_overrides[key]
+
+    if "read_allow_from" in request_overrides:
+        allow_ids = merged.get("read_allow_chat_ids") or []
+        merged["read_allow_chat_ids"] = list(set(allow_ids) | set(request_overrides["read_allow_from"]))
+
+    if "read_deny_from" in request_overrides:
+        deny_ids = merged.get("read_deny_chat_ids") or []
+        merged["read_deny_chat_ids"] = list(set(deny_ids) | set(request_overrides["read_deny_from"]))
+
+    if "write_allow_to" in request_overrides:
+        allow_ids = merged.get("write_allow_chat_ids") or []
+        merged["write_allow_chat_ids"] = list(set(allow_ids) | set(request_overrides["write_allow_to"]))
+
+    if "write_deny_to" in request_overrides:
+        deny_ids = merged.get("write_deny_chat_ids") or []
+        merged["write_deny_chat_ids"] = list(set(deny_ids) | set(request_overrides["write_deny_to"]))
 
     return merged

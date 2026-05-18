@@ -1,8 +1,10 @@
 """Unit tests for bridge client logic without real Telethon."""
 
 import asyncio
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -603,48 +605,52 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message["id"] for message in messages], [10])
 
     async def test_send_file_uses_write_scope(self) -> None:
-        bridge = self.create_bridge(write_allow_chat_ids=["me", "42"])
-        entity = SimpleNamespace(id=42, username="allowed")
-        self.mock_tg.get_entity.return_value = entity
-        self.mock_tg.send_file.return_value = SimpleNamespace(id=333)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            upload_root = Path(tmpdir)
+            upload_file = upload_root / "file.txt"
+            upload_file.write_text("hello", encoding="utf-8")
+            bridge = self.create_bridge(write_allow_chat_ids=["me", "42"], allowed_file_roots=[str(upload_root)])
+            entity = SimpleNamespace(id=42, username="allowed")
+            self.mock_tg.get_entity.return_value = entity
+            self.mock_tg.send_file.return_value = SimpleNamespace(id=333)
 
-        with patch("hermes_tg_bridge.client.asyncio.sleep", new=AsyncMock()), patch(
-            "hermes_tg_bridge.client.Path.exists", return_value=True
-        ):
-            result = await bridge.send_file("42", "/tmp/file.txt", caption="hello")
+            with patch("hermes_tg_bridge.client.asyncio.sleep", new=AsyncMock()):
+                result = await bridge.send_file("42", str(upload_file), caption="hello")
 
         self.assertEqual(result["message_id"], 333)
         self.mock_tg.send_file.assert_awaited_once_with(
             entity,
-            "/tmp/file.txt",
+            str(upload_file.resolve()),
             caption="hello",
             reply_to=None,
         )
 
     async def test_send_file_forwards_new_send_options(self) -> None:
-        bridge = self.create_bridge(write_allow_chat_ids=["42", "me"])
-        entity = SimpleNamespace(id=42, username="allowed")
-        self.mock_tg.get_entity.return_value = entity
-        self.mock_tg.send_file.return_value = SimpleNamespace(id=333)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            upload_root = Path(tmpdir)
+            upload_file = upload_root / "file.txt"
+            upload_file.write_text("hello", encoding="utf-8")
+            bridge = self.create_bridge(write_allow_chat_ids=["42", "me"], allowed_file_roots=[str(upload_root)])
+            entity = SimpleNamespace(id=42, username="allowed")
+            self.mock_tg.get_entity.return_value = entity
+            self.mock_tg.send_file.return_value = SimpleNamespace(id=333)
 
-        with patch("hermes_tg_bridge.client.Path.exists", return_value=True), patch(
-            "hermes_tg_bridge.client.asyncio.sleep", new=AsyncMock()
-        ):
-            await bridge.send_file(
-                "42",
-                "/tmp/file.txt",
-                caption="hello",
-                mime_type="text/plain",
-                silent=True,
-                background=True,
-                clear_draft=True,
-                send_as="@channel",
-                message_effect_id=123456,
-            )
+            with patch("hermes_tg_bridge.client.asyncio.sleep", new=AsyncMock()):
+                await bridge.send_file(
+                    "42",
+                    str(upload_file),
+                    caption="hello",
+                    mime_type="text/plain",
+                    silent=True,
+                    background=True,
+                    clear_draft=True,
+                    send_as="@channel",
+                    message_effect_id=123456,
+                )
 
         self.mock_tg.send_file.assert_awaited_once_with(
             entity,
-            "/tmp/file.txt",
+            str(upload_file.resolve()),
             caption="hello",
             reply_to=None,
             mime_type="text/plain",
@@ -661,6 +667,35 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
         with patch("hermes_tg_bridge.client.Path.exists", return_value=True):
             with self.assertRaisesRegex(BridgeForbiddenError, "backend-host files"):
                 await bridge.send_file("42", "/tmp/file.txt")
+
+    async def test_send_file_rejects_path_outside_allowed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as allowed_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            allowed_root = Path(allowed_tmp)
+            outside_file = Path(outside_tmp) / "secret.txt"
+            outside_file.write_text("secret", encoding="utf-8")
+            bridge = self.create_bridge(write_allow_chat_ids=["me", "42"], allowed_file_roots=[str(allowed_root)])
+
+            with self.assertRaisesRegex(BridgeForbiddenError, "allowed upload roots"):
+                await bridge.send_file("42", str(outside_file))
+
+        self.mock_tg.send_file.assert_not_awaited()
+
+    async def test_send_voice_and_sticker_reject_paths_outside_allowed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as allowed_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            allowed_root = Path(allowed_tmp)
+            outside_file = Path(outside_tmp) / "secret.ogg"
+            outside_file.write_text("secret", encoding="utf-8")
+
+            for method_name in ("send_voice", "send_sticker"):
+                with self.subTest(method_name=method_name):
+                    self.mock_tg.send_file.reset_mock()
+                    bridge = self.create_bridge(write_allow_chat_ids=["me", "42"], allowed_file_roots=[str(allowed_root)])
+                    method = getattr(bridge, method_name)
+
+                    with self.assertRaisesRegex(BridgeForbiddenError, "allowed upload roots"):
+                        await method("42", str(outside_file))
+
+                    self.mock_tg.send_file.assert_not_awaited()
 
     async def test_get_blocked_users_requires_self_write_access(self) -> None:
         bridge = self.create_bridge(write_allow_chat_ids=["42"])
@@ -759,45 +794,103 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(message["contact_vcard"].startswith("BEGIN:VCARD"))
 
     async def test_download_media_fetches_message_once_and_serializes_it(self) -> None:
-        bridge = self.create_bridge(allow_chat_ids=["42"], write_allow_chat_ids=["me", "42"])
-        entity = SimpleNamespace(id=42, username="allowed")
-        tg_message = SimpleNamespace(
-            id=71,
-            text="photo from field",
-            date=datetime(2026, 3, 14, 10, 0, tzinfo=timezone.utc),
-            out=False,
-            sender_id=7,
-            media=SimpleNamespace(),
-            file=SimpleNamespace(name="photo.jpg", size=1234, mime_type="image/jpeg"),
-        )
-        self.mock_tg.get_entity.return_value = entity
-        self.mock_tg.get_messages.return_value = tg_message
-        self.mock_tg.download_media.return_value = "/tmp/photo.jpg"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = Path(tmpdir)
+            output_file = download_root / "out.bin"
+            bridge = self.create_bridge(
+                allow_chat_ids=["42"],
+                write_allow_chat_ids=["me", "42"],
+                media_download_root=str(download_root),
+            )
+            entity = SimpleNamespace(id=42, username="allowed")
+            tg_message = SimpleNamespace(
+                id=71,
+                text="photo from field",
+                date=datetime(2026, 3, 14, 10, 0, tzinfo=timezone.utc),
+                out=False,
+                sender_id=7,
+                media=SimpleNamespace(),
+                file=SimpleNamespace(name="photo.jpg", size=1234, mime_type="image/jpeg"),
+            )
+            self.mock_tg.get_entity.return_value = entity
+            self.mock_tg.get_messages.return_value = tg_message
+            self.mock_tg.download_media.return_value = str(download_root / "photo.jpg")
 
-        result = await bridge.download_media("42", 71, output_path="/tmp/out.bin")
+            result = await bridge.download_media("42", 71, output_path=str(output_file))
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["path"], "/tmp/photo.jpg")
+        self.assertEqual(result["path"], str(download_root / "photo.jpg"))
         self.assertEqual(result["message"]["id"], 71)
         self.mock_tg.get_messages.assert_awaited_once_with(entity, ids=71)
-        self.mock_tg.download_media.assert_awaited_once_with(tg_message, file="/tmp/out.bin")
+        self.mock_tg.download_media.assert_awaited_once_with(tg_message, file=str(output_file.resolve()))
+
+    async def test_download_media_defaults_to_download_root_when_output_path_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = Path(tmpdir)
+            bridge = self.create_bridge(
+                allow_chat_ids=["42"],
+                write_allow_chat_ids=["me", "42"],
+                media_download_root=str(download_root),
+            )
+            entity = SimpleNamespace(id=42, username="allowed")
+            tg_message = SimpleNamespace(id=71, media=SimpleNamespace())
+            self.mock_tg.get_entity.return_value = entity
+            self.mock_tg.get_messages.return_value = tg_message
+            self.mock_tg.download_media.return_value = str(download_root / "photo.jpg")
+
+            await bridge.download_media("42", 71)
+
+        self.mock_tg.download_media.assert_awaited_once_with(tg_message, file=str(download_root.resolve()))
+
+    async def test_download_media_rejects_output_path_outside_download_root(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            download_root = Path(root_tmp)
+            outside_file = Path(outside_tmp) / "out.bin"
+            bridge = self.create_bridge(
+                allow_chat_ids=["42"],
+                write_allow_chat_ids=["me", "42"],
+                media_download_root=str(download_root),
+            )
+
+            with self.assertRaisesRegex(BridgeForbiddenError, "download root"):
+                await bridge.download_media("42", 71, output_path=str(outside_file))
+
+        self.mock_tg.download_media.assert_not_awaited()
 
     async def test_download_media_for_inbox_uses_read_scope_only(self) -> None:
-        bridge = self.create_bridge(allow_chat_ids=["42"], write_allow_chat_ids=["42"])
-        entity = SimpleNamespace(id=42, username="allowed")
-        tg_message = SimpleNamespace(
-            id=81,
-            media=SimpleNamespace(),
-        )
-        self.mock_tg.get_entity.return_value = entity
-        self.mock_tg.get_messages.return_value = tg_message
-        self.mock_tg.download_media.return_value = "/tmp/inbox/81_photo.jpg"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = Path(tmpdir)
+            output_file = download_root / "81_photo.jpg"
+            bridge = self.create_bridge(
+                allow_chat_ids=["42"],
+                write_allow_chat_ids=["42"],
+                media_download_root=str(download_root),
+            )
+            entity = SimpleNamespace(id=42, username="allowed")
+            tg_message = SimpleNamespace(
+                id=81,
+                media=SimpleNamespace(),
+            )
+            self.mock_tg.get_entity.return_value = entity
+            self.mock_tg.get_messages.return_value = tg_message
+            self.mock_tg.download_media.return_value = str(output_file)
 
-        downloaded = await bridge.download_media_for_inbox("42", 81, output_path="/tmp/inbox/81_photo.jpg")
+            downloaded = await bridge.download_media_for_inbox("42", 81, output_path=str(output_file))
 
-        self.assertEqual(downloaded, "/tmp/inbox/81_photo.jpg")
+        self.assertEqual(downloaded, str(output_file))
         self.mock_tg.get_messages.assert_awaited_once_with(entity, ids=81)
-        self.mock_tg.download_media.assert_awaited_once_with(tg_message, file="/tmp/inbox/81_photo.jpg")
+        self.mock_tg.download_media.assert_awaited_once_with(tg_message, file=str(output_file.resolve()))
+
+    async def test_download_media_for_inbox_rejects_output_path_outside_download_root(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            download_root = Path(root_tmp)
+            outside_file = Path(outside_tmp) / "81_photo.jpg"
+            bridge = self.create_bridge(allow_chat_ids=["42"], media_download_root=str(download_root))
+
+            with self.assertRaisesRegex(BridgeForbiddenError, "download root"):
+                await bridge.download_media_for_inbox("42", 81, output_path=str(outside_file))
+
+        self.mock_tg.download_media.assert_not_awaited()
 
     async def test_download_media_for_inbox_returns_none_for_non_media_message(self) -> None:
         bridge = self.create_bridge(allow_chat_ids=["42"])
@@ -847,6 +940,40 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(participants, [{"id": 7, "username": "alice", "title": "Alice", "bot": False}])
         self.mock_tg.get_participants.assert_awaited_once_with(entity, limit=50, offset=10)
+
+    async def test_resolve_username_rejects_peer_outside_read_allowlist(self) -> None:
+        bridge = self.create_bridge(allow_chat_ids=["allowed"])
+        self.mock_tg.get_entity.return_value = SimpleNamespace(id=43, username="other")
+
+        with self.assertRaisesRegex(BridgeForbiddenError, "Resolve username is not allowed"):
+            await bridge.resolve_username("other")
+
+    async def test_resolve_username_uses_policy_overrides(self) -> None:
+        bridge = self.create_bridge(allow_chat_ids=["other"])
+        entity = SimpleNamespace(id=42, username="allowed", first_name="Allowed", last_name=None)
+        self.mock_tg.get_entity.return_value = entity
+
+        resolved = await bridge.resolve_username("allowed", policy_overrides={"read_allow_chat_ids": ["allowed"]})
+
+        self.assertEqual(resolved["id"], 42)
+        self.assertEqual(resolved["username"], "allowed")
+
+    async def test_get_user_status_rejects_peer_outside_read_allowlist(self) -> None:
+        bridge = self.create_bridge(allow_chat_ids=["allowed"])
+        self.mock_tg.get_entity.return_value = SimpleNamespace(id=43, username="other", status=None)
+
+        with self.assertRaisesRegex(BridgeForbiddenError, "Read user status is not allowed"):
+            await bridge.get_user_status("other")
+
+    async def test_get_user_status_uses_policy_overrides(self) -> None:
+        bridge = self.create_bridge(allow_chat_ids=["other"])
+        entity = SimpleNamespace(id=42, username="allowed", status=SimpleNamespace(was_online=None, expires=None))
+        self.mock_tg.get_entity.return_value = entity
+
+        status = await bridge.get_user_status("allowed", policy_overrides={"read_allow_chat_ids": ["allowed"]})
+
+        self.assertEqual(status["id"], 42)
+        self.assertEqual(status["username"], "allowed")
 
     async def test_get_admins_supports_basic_groups(self) -> None:
         bridge = self.create_bridge(allow_chat_ids=["42"])

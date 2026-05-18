@@ -39,14 +39,27 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertEqual(overrides["policy_profile"], "owner")
         self.assertEqual(overrides["reply_delay_sec"], 2.5)
         self.assertEqual(overrides["reply_delay_max_sec"], 4.0)
-        self.assertEqual(overrides["read_allow_chat_ids"], ["@User", "-1001"])
-        self.assertEqual(overrides["read_deny_chat_ids"], ["spam"])
-        self.assertEqual(overrides["write_allow_chat_ids"], ["@allowed"])
-        self.assertEqual(overrides["write_deny_chat_ids"], ["-1002"])
+        self.assertEqual(overrides["read_allow_from"], ["@User", "-1001"])
+        self.assertEqual(overrides["read_deny_from"], ["spam"])
+        self.assertEqual(overrides["write_allow_to"], ["@allowed"])
+        self.assertEqual(overrides["write_deny_to"], ["-1002"])
 
     def test_parse_request_overrides_rejects_invalid_numbers(self) -> None:
         with self.assertRaisesRegex(ValueError, "reply delay"):
             parse_request_overrides({"X-Hermes-Reply-Delay-Sec": "oops"})
+
+    def test_parse_request_overrides_handles_empty_id_lists(self) -> None:
+        overrides = parse_request_overrides(
+            {
+                "X-Hermes-Allow-From": "",
+                "X-Hermes-Deny-From": "  ,  ,  ",
+                "X-Hermes-Write-To": "id1, , id2",
+            }
+        )
+
+        self.assertEqual(overrides["read_allow_from"], [])
+        self.assertEqual(overrides["read_deny_from"], [])
+        self.assertEqual(overrides["write_allow_to"], ["id1", "id2"])
 
     def test_resolve_local_session_file_creates_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,14 +129,21 @@ class TestConfigHelpers(unittest.TestCase):
             effective = resolve_effective_policy(
                 config,
                 PolicyStore(str(policy_file)),
-                {"read_deny_chat_ids": ["blocked"]},
+                {
+                    "reply_delay_sec": 0.25,
+                    "read_allow_chat_ids": ["attacker"],
+                    "read_deny_chat_ids": ["blocked"],
+                    "write_allow_chat_ids": ["attacker"],
+                    "write_deny_chat_ids": ["me"],
+                },
             )
 
             self.assertEqual(effective["policy_profile"], "owner")
-            self.assertEqual(effective["reply_delay_sec"], 2.0)
+            self.assertEqual(effective["reply_delay_sec"], 0.25)
             self.assertEqual(effective["read_allow_chat_ids"], ["me", "-1001"])
             self.assertEqual(effective["write_allow_chat_ids"], ["me"])
-            self.assertEqual(effective["read_deny_chat_ids"], ["blocked"])
+            self.assertEqual(effective["read_deny_chat_ids"], [])
+            self.assertEqual(effective["write_deny_chat_ids"], [])
             self.assertFalse(effective["sources_auto_discover"])
 
             shared_effective = resolve_effective_policy(
@@ -134,6 +154,35 @@ class TestConfigHelpers(unittest.TestCase):
             self.assertTrue(shared_effective["sources_auto_discover"])
             self.assertEqual(shared_effective["sources_include_types"], ["channel", "supergroup"])
             self.assertEqual(shared_effective["sources_exclude_usernames"], ["private_feed"])
+
+    def test_deploy_policy_example_matches_policy_store_schema(self) -> None:
+        policy_file = Path(__file__).resolve().parents[2] / "deploy" / "policy.json.example"
+        policy_data = json.loads(policy_file.read_text(encoding="utf-8"))
+
+        self.assertIn("defaults", policy_data)
+        self.assertIn("profiles", policy_data)
+        self.assertNotIn("policy_profiles", policy_data)
+
+        effective = PolicyStore(str(policy_file)).resolve("dm_inbox")
+
+        self.assertIn("read", effective)
+        self.assertIn("write", effective)
+        self.assertIn("allow", effective["read"])
+        self.assertIn("allow", effective["write"])
+        self.assertIn("replyDelaySec", effective)
+        self.assertNotIn("read_allow_chat_ids", effective)
+        self.assertNotIn("write_allow_chat_ids", effective)
+
+    def test_systemd_template_uses_backend_env_names_and_run_subcommand(self) -> None:
+        service_file = Path(__file__).resolve().parents[2] / "deploy" / "hermes-tg-bridge.service"
+        service = service_file.read_text(encoding="utf-8")
+
+        self.assertIn("EnvironmentFile=-/etc/hermes-tg-bridge/secret.env", service)
+        self.assertNotIn("Environment=TELEGRAM_BRIDGE_API_TOKEN=", service)
+        self.assertIn("Environment=TELEGRAM_POLICY_PATH=", service)
+        self.assertNotIn("HERMES_TG_BRIDGE_API_TOKEN", service)
+        self.assertNotIn("TELEGRAM_BRIDGE_POLICY_PATH", service)
+        self.assertIn("ExecStart=/opt/hermes-tg-bridge/backend/.venv/bin/hermes-tg-bridge run", service)
 
     def test_unknown_profile_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

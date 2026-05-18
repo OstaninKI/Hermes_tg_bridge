@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import logging
 import mimetypes
+import os
 import re
 import time
 from collections import deque
@@ -14,7 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hermes_tg_bridge.client import (
     BridgeClient,
@@ -49,6 +50,10 @@ _process_lock: ProcessLock | None = None
 _needs_reauth: bool = False
 _qr_auth_ctx: "Any | None" = None  # QrAuthContext, typed as Any to avoid circular import
 _qr_auth_task: "asyncio.Task | None" = None
+
+# Extended API control
+_EXTENDED_API_DISABLED = os.getenv("TELEGRAM_DISABLE_EXTENDED_API", "").strip().lower() in {"1", "true", "yes", "on"}
+
 NON_DOWNLOADABLE_DM_MEDIA_TYPES = frozenset(
     {
         "MessageMediaContact",
@@ -269,6 +274,8 @@ async def _create_client() -> BridgeClient:
         write_deny_chat_ids=cfg["write_deny_chat_ids"] or None,
         rpc_timeout_sec=cfg["rpc_timeout_sec"],
         flood_wait_max_sleep_sec=cfg["flood_wait_max_sleep_sec"],
+        allowed_file_roots=cfg.get("file_upload_roots"),
+        media_download_root=cfg.get("dm_media_path"),
     )
 
 
@@ -317,6 +324,16 @@ async def lifespan(app: FastAPI):
     from telethon import events
 
     _config = load_config()
+
+    if not _config.get("api_token"):
+        allow_no_token = os.environ.get("TELEGRAM_BRIDGE_ALLOW_NO_TOKEN", "").strip().lower() == "1"
+        if not allow_no_token:
+            raise RuntimeError(
+                "api_token is not configured. Set TELEGRAM_BRIDGE_API_TOKEN or "
+                "explicitly opt-in with TELEGRAM_BRIDGE_ALLOW_NO_TOKEN=1 to run without authentication."
+            )
+        logger.warning("Bridge is running without authentication (TELEGRAM_BRIDGE_ALLOW_NO_TOKEN=1)")
+
     _process_lock = ProcessLock(_config.get("lock_path"))
     _process_lock.acquire()
     _policy_store = PolicyStore(_config.get("policy_path"))
@@ -396,6 +413,11 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _ensure_extended_api_enabled() -> None:
+    if _EXTENDED_API_DISABLED:
+        raise HTTPException(status_code=404, detail="Extended API disabled")
+
+
 class SendMessageBody(BaseModel):
     peer: str | int = Field(..., description="Username (@name), chat id, or 'me'")
     text: str = Field(..., min_length=1, max_length=100_000)
@@ -407,7 +429,16 @@ class SendMessageBody(BaseModel):
     message_effect_id: int | None = Field(default=None, ge=1)
 
 
-class SendFileBody(BaseModel):
+class _PathValidatedBody(BaseModel):
+    @field_validator("file_path", check_fields=False)
+    @classmethod
+    def validate_file_path(cls, v: str) -> str:
+        if ".." in v:
+            raise ValueError("Path traversal (..) is not allowed")
+        return v
+
+
+class SendFileBody(_PathValidatedBody):
     peer: str | int = Field(..., description="Username (@name), chat id, or 'me'")
     file_path: str = Field(..., min_length=1)
     caption: str | None = None
@@ -455,7 +486,7 @@ class LeaveChatBody(BaseModel):
     peer: str | int = Field(..., description="Username (@name) or chat id")
 
 
-class SendVoiceBody(BaseModel):
+class SendVoiceBody(_PathValidatedBody):
     peer: str | int = Field(..., description="Username (@name), chat id, or 'me'")
     file_path: str = Field(..., min_length=1)
     caption: str | None = None
@@ -466,7 +497,7 @@ class TranscribeVoiceBody(BaseModel):
     message_id: int = Field(..., ge=1)
 
 
-class SendStickerBody(BaseModel):
+class SendStickerBody(_PathValidatedBody):
     peer: str | int = Field(..., description="Username (@name), chat id, or 'me'")
     file_path: str = Field(..., min_length=1)
 
@@ -918,6 +949,7 @@ async def send_message(request: Request, body: SendMessageBody):
 
 @app.post("/send_file")
 async def send_file(request: Request, body: SendFileBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -946,6 +978,7 @@ async def send_file(request: Request, body: SendFileBody):
 
 @app.post("/send_voice")
 async def send_voice(request: Request, body: SendVoiceBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -985,6 +1018,7 @@ async def transcribe_voice(request: Request, body: TranscribeVoiceBody):
 
 @app.post("/send_sticker")
 async def send_sticker(request: Request, body: SendStickerBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1004,6 +1038,7 @@ async def send_sticker(request: Request, body: SendStickerBody):
 
 @app.post("/send_location")
 async def send_location(request: Request, body: SendLocationBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1025,6 +1060,7 @@ async def send_location(request: Request, body: SendLocationBody):
 
 @app.post("/edit_message")
 async def edit_message(request: Request, body: EditMessageBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1046,6 +1082,7 @@ async def edit_message(request: Request, body: EditMessageBody):
 
 @app.post("/delete_message")
 async def delete_message(request: Request, body: DeleteMessageBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1067,6 +1104,7 @@ async def delete_message(request: Request, body: DeleteMessageBody):
 
 @app.post("/forward_message")
 async def forward_message(request: Request, body: ForwardMessageBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1295,6 +1333,7 @@ async def download_media(request: Request, peer: str | int, message_id: int, out
 
 @app.get("/contacts")
 async def contacts(request: Request):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1310,6 +1349,7 @@ async def contacts(request: Request):
 
 @app.post("/search_contacts")
 async def search_contacts(request: Request, body: SearchContactsBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1325,6 +1365,7 @@ async def search_contacts(request: Request, body: SearchContactsBody):
 
 @app.post("/contacts/add")
 async def add_contact(request: Request, body: ContactBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1345,6 +1386,7 @@ async def add_contact(request: Request, body: ContactBody):
 
 @app.post("/contacts/delete")
 async def delete_contact(request: Request, body: ContactPeerBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1375,6 +1417,7 @@ async def blocked_users(request: Request, limit: int = 100):
 
 @app.post("/block_user")
 async def block_user(request: Request, body: ContactPeerBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1390,6 +1433,7 @@ async def block_user(request: Request, body: ContactPeerBody):
 
 @app.post("/unblock_user")
 async def unblock_user(request: Request, body: ContactPeerBody):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1404,10 +1448,12 @@ async def unblock_user(request: Request, body: ContactPeerBody):
 
 
 @app.get("/resolve_username")
-async def resolve_username(username: str):
+async def resolve_username(request: Request, username: str):
+    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
-        return await bridge.resolve_username(username)
+        overrides = await resolve_request_policy(request)
+        return await bridge.resolve_username(username, policy_overrides=overrides)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BridgeError as exc:
@@ -1418,10 +1464,11 @@ async def resolve_username(username: str):
 
 
 @app.get("/user_status")
-async def user_status(peer: str | int):
+async def user_status(request: Request, peer: str | int):
     bridge = get_bridge()
     try:
-        return await bridge.get_user_status(peer)
+        overrides = await resolve_request_policy(request)
+        return await bridge.get_user_status(peer, policy_overrides=overrides)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BridgeError as exc:
@@ -1968,6 +2015,7 @@ async def send_dm_typing(request: Request, body: DmPeerBody):
 
 @app.get("/sources")
 async def list_sources(request: Request, refresh: bool = False):
+    _ensure_extended_api_enabled()
     try:
         policy = await resolve_request_policy(request)
         data = await _sync_sources_inventory(force=refresh)
@@ -1990,6 +2038,7 @@ async def list_sources(request: Request, refresh: bool = False):
 
 @app.post("/sources/sync")
 async def sync_sources(request: Request, body: SyncSourcesBody):
+    _ensure_extended_api_enabled()
     try:
         policy = await resolve_request_policy(request)
         data = await _sync_sources_inventory(force=True, limit=body.limit)
@@ -2094,6 +2143,8 @@ async def _server_qr_flow(ctx: Any) -> None:
             write_deny_chat_ids=cfg["write_deny_chat_ids"] or None,
             rpc_timeout_sec=cfg["rpc_timeout_sec"],
             flood_wait_max_sleep_sec=cfg["flood_wait_max_sleep_sec"],
+            allowed_file_roots=cfg.get("file_upload_roots"),
+            media_download_root=cfg.get("dm_media_path"),
         )
         client.add_event_handler(_on_new_dm, telethon_events.NewMessage(incoming=True))
         _bridge = new_bridge

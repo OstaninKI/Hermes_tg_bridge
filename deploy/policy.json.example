@@ -1,22 +1,35 @@
 {
-  "policy_profiles": {
-    "dm_inbox": {
-      "read_allow_chat_ids": ["123456789"],
-      "read_deny_chat_ids": [],
-      "write_allow_chat_ids": ["123456789"],
-      "write_deny_chat_ids": [],
-      "reply_delay_sec": 0.0,
-      "reply_delay_max_sec": 0.0
+  "defaults": {
+    "replyDelaySec": 0.0,
+    "replyDelayMaxSec": 0.0,
+    "read": {
+      "allow": [],
+      "deny": []
+    },
+    "write": {
+      "allow": [],
+      "deny": []
+    },
+    "sources": {
+      "autoDiscover": false,
+      "includeTypes": [],
+      "excludePeers": [],
+      "excludeUsernames": []
     }
   },
-  "default_policy_profile": "dm_inbox",
-  "session_state_dir": "/var/lib/hermes-tg-bridge/telethon",
-  "dm_inbox_state_path": "/var/lib/hermes-tg-bridge/telethon/inbox_state.json",
-  "sources_inventory_path": "/var/lib/hermes-tg-bridge/telethon/sources_inventory.json",
-  "dm_media_path": "/var/lib/hermes-tg-bridge/telethon/media",
-  "lock_path": "/var/lib/hermes-tg-bridge/telethon/bridge.lock",
-  "listen_host": "127.0.0.1",
-  "listen_port": 8765,
-  "api_token_header": "Authorization",
-  "api_token_prefix": "Bearer"
+  "profiles": {
+    "dm_inbox": {
+      "read": {
+        "allow": ["<your-telegram-user-id>"],
+        "deny": []
+      },
+      "write": {
+        "allow": ["<your-telegram-user-id>"],
+        "deny": []
+      },
+      "replyDelaySec": 0.0,
+      "replyDelayMaxSec": 0.0
+    }
+  },
+  "_comment": "Replace '<your-telegram-user-id>' placeholders with actual Telegram user IDs before deploying"
 }

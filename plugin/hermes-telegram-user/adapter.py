@@ -4,9 +4,116 @@ import asyncio
 import inspect
 import os
 from dataclasses import dataclass, field
+from enum import Enum
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+
+try:
+    from gateway.config import Platform, PlatformConfig
+    from gateway.platforms.base import (
+        BasePlatformAdapter,
+        MessageEvent,
+        MessageType,
+        SendResult,
+    )
+except ImportError:
+    class Platform(str):
+        def __new__(cls, value: str) -> "Platform":
+            return str.__new__(cls, value)
+
+    @dataclass
+    class PlatformConfig:
+        extra: dict[str, Any] = field(default_factory=dict)
+
+    class MessageType(Enum):
+        TEXT = "text"
+
+    @dataclass
+    class MessageEvent:
+        text: str
+        message_type: MessageType = MessageType.TEXT
+        source: Any = None
+        raw_message: Any = None
+        message_id: str | None = None
+        media_urls: list[str] = field(default_factory=list)
+        media_types: list[str] = field(default_factory=list)
+
+    @dataclass
+    class SendResult:
+        success: bool
+        message_id: str | None = None
+        error: str | None = None
+        raw_response: Any = None
+        retryable: bool = False
+
+    class BasePlatformAdapter:
+        def __init__(self, config: Any, platform: Any) -> None:
+            self.config = config
+            self.platform = platform
+            self._running = False
+            self._message_handler = None
+
+        @property
+        def name(self) -> str:
+            return str(self.platform)
+
+        @property
+        def is_connected(self) -> bool:
+            return self._running
+
+        def _mark_connected(self) -> None:
+            self._running = True
+
+        def _mark_disconnected(self) -> None:
+            self._running = False
+
+        def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
+            self._running = False
+            self._fatal_error_code = code
+            self._fatal_error_message = message
+            self._fatal_error_retryable = retryable
+
+        def build_source(
+            self,
+            chat_id: str,
+            chat_name: str | None = None,
+            chat_type: str = "dm",
+            user_id: str | None = None,
+            user_name: str | None = None,
+            thread_id: str | None = None,
+            chat_topic: str | None = None,
+            user_id_alt: str | None = None,
+            chat_id_alt: str | None = None,
+            is_bot: bool = False,
+            guild_id: str | None = None,
+            parent_chat_id: str | None = None,
+            message_id: str | None = None,
+        ) -> Any:
+            return SimpleNamespace(
+                platform=self.platform,
+                chat_id=str(chat_id),
+                chat_name=chat_name,
+                chat_type=chat_type,
+                user_id=str(user_id) if user_id else None,
+                user_name=user_name,
+                thread_id=str(thread_id) if thread_id else None,
+                chat_topic=chat_topic,
+                user_id_alt=user_id_alt,
+                chat_id_alt=chat_id_alt,
+                is_bot=is_bot,
+                guild_id=str(guild_id) if guild_id else None,
+                parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
+                message_id=str(message_id) if message_id else None,
+            )
+
+        async def handle_message(self, event: MessageEvent) -> None:
+            if self._message_handler is None:
+                return
+            result = self._message_handler(event)
+            if inspect.isawaitable(result):
+                await result
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -116,16 +223,30 @@ class AdapterConfig:
         )
 
 
+def _parse_retry_after(value: str | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        seconds = float(value.strip())
+        return min(max(seconds, 0), 60)
+    except (ValueError, AttributeError):
+        return default
+
+
 def build_policy_headers(config: AdapterConfig) -> dict[str, str]:
-    allow_from = "*" if config.allow_all_users else ",".join(config.allow_from)
-    return {
+    headers = {
         "Authorization": f"Bearer {config.api_token}",
         "X-Hermes-Policy-Profile": config.policy_profile,
-        "X-Hermes-Allow-From": allow_from,
-        "X-Hermes-Deny-From": ",".join(config.deny_from),
-        "X-Hermes-Write-To": ",".join(config.write_to or config.allow_from),
-        "X-Hermes-Deny-Write-To": ",".join(config.deny_write_to),
     }
+    if config.allow_from:
+        headers["X-Hermes-Allow-From"] = ",".join(config.allow_from)
+    if config.deny_from:
+        headers["X-Hermes-Deny-From"] = ",".join(config.deny_from)
+    if config.write_to:
+        headers["X-Hermes-Write-To"] = ",".join(config.write_to)
+    if config.deny_write_to:
+        headers["X-Hermes-Deny-Write-To"] = ",".join(config.deny_write_to)
+    return headers
 
 
 class BridgeClient:
@@ -197,16 +318,21 @@ class BridgeClient:
         return response.json()
 
 
-class TelegramUserAdapter:
+class TelegramUserAdapter(BasePlatformAdapter):
     platform_name = "telegram_user"
 
-    def __init__(self, config: AdapterConfig, bridge: Any | None = None) -> None:
-        self.config = config
-        self.bridge = bridge or BridgeClient(config)
-        self._running = False
+    def __init__(self, config: AdapterConfig | PlatformConfig, bridge: Any | None = None) -> None:
+        super().__init__(config=config, platform=Platform(self.platform_name))
+        extra = getattr(config, "extra", {}) if not isinstance(config, AdapterConfig) else {}
+        self.adapter_config = config if isinstance(config, AdapterConfig) else AdapterConfig.from_env_and_extra(extra)
+        self.bridge = bridge or BridgeClient(self.adapter_config)
         self._poll_task: asyncio.Task[Any] | None = None
 
-    def event_to_message(self, event: dict[str, Any]) -> dict[str, Any]:
+    @property
+    def name(self) -> str:
+        return "Telegram User"
+
+    def event_to_message(self, event: dict[str, Any]) -> MessageEvent:
         text = str(event.get("text") or "")
         if not text and event.get("has_media"):
             media_type = event.get("media_type") or "unknown"
@@ -215,27 +341,37 @@ class TelegramUserAdapter:
         sender_id = str(event.get("sender_id", ""))
         sender_name = event.get("sender_name")
         sender_username = event.get("sender_username")
+        display_name = sender_name or sender_username or sender_id
+        message_id = str(event["id"])
 
-        return {
-            "platform": self.platform_name,
-            "chat_id": sender_id,
-            "chat_type": "dm",
-            "user_id": sender_id,
-            "user_name": sender_name,
-            "content": text,
-            "metadata": {
-                "telegram_message_id": int(event["id"]),
-                "sender_username": sender_username,
-            },
-        }
+        source = self.build_source(
+            chat_id=sender_id,
+            chat_name=display_name,
+            chat_type="dm",
+            user_id=sender_id,
+            user_name=display_name,
+            message_id=message_id,
+        )
+        return MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=event,
+            message_id=message_id,
+        )
 
-    async def connect(self) -> None:
-        await self.bridge.health()
-        self._running = True
+    async def connect(self) -> bool:
+        try:
+            await self.bridge.health()
+        except Exception as exc:
+            self._set_fatal_error("bridge_unavailable", str(exc), retryable=True)
+            return False
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._mark_connected()
+        return True
 
     async def disconnect(self) -> None:
-        self._running = False
+        self._mark_disconnected()
         poll_task = self._poll_task
         self._poll_task = None
         if poll_task is not None:
@@ -251,7 +387,7 @@ class TelegramUserAdapter:
                 await result
 
     async def _poll_loop(self) -> None:
-        delay = max(self.config.poll_interval_ms / 1000.0, 0.1)
+        delay = max(self.adapter_config.poll_interval_ms / 1000.0, 0.1)
         bounded_delay = min(delay, 5.0)
         while self._running:
             try:
@@ -261,18 +397,41 @@ class TelegramUserAdapter:
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403):
+                    self._set_fatal_error("bridge_unauthorized", str(exc), retryable=False)
+                    self._mark_disconnected()
+                    return
+                elif exc.response.status_code == 429:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    sleep_time = _parse_retry_after(retry_after, bounded_delay)
+                    await asyncio.sleep(sleep_time)
+                else:
+                    await asyncio.sleep(bounded_delay)
             except Exception:
                 await asyncio.sleep(bounded_delay)
 
     async def _handle_inbound_event(self, event: dict[str, Any]) -> None:
+        if not self.adapter_config.allow_all_users and self.adapter_config.allow_from:
+            sender_id = str(event.get("sender_id", ""))
+            sender_username = event.get("sender_username")
+            if sender_username and sender_username.startswith("@"):
+                sender_username = sender_username[1:]
+
+            allow_from_lower = [item.lower() for item in self.adapter_config.allow_from]
+            sender_id_match = sender_id in self.adapter_config.allow_from
+            username_match = (
+                sender_username
+                and sender_username.lower() in allow_from_lower
+            )
+
+            if not (sender_id_match or username_match):
+                return
+
         message = self.event_to_message(event)
-        handler = getattr(self, "handle_message", None)
-        if handler is not None:
-            result = handler(message)
-            if inspect.isawaitable(result):
-                await result
+        await self.handle_message(message)
         await self.bridge.ack(event)
-        if self.config.mark_read_on_inbound:
+        if self.adapter_config.mark_read_on_inbound:
             await self.bridge.mark_read(event)
 
     async def send(
@@ -281,7 +440,7 @@ class TelegramUserAdapter:
         content: str,
         reply_to: Any | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> SendResult:
         try:
             payload = await self.bridge.send_message(
                 chat_id,
@@ -293,26 +452,67 @@ class TelegramUserAdapter:
                 message_id = payload.get("message_id")
                 if message_id is None:
                     message_id = payload.get("id")
-            return {"success": True, "message_id": message_id, "error": None}
+            return SendResult(
+                success=True,
+                message_id=str(message_id) if message_id is not None else None,
+                raw_response=payload,
+            )
         except Exception as exc:
-            return {"success": False, "message_id": None, "error": str(exc)}
+            return SendResult(success=False, error=str(exc))
 
     async def send_typing(self, chat_id: Any, metadata: dict[str, Any] | None = None) -> Any:
         sender_username = metadata.get("sender_username") if metadata else None
         return await self.bridge.send_typing(chat_id, sender_username)
 
-    @classmethod
-    def register(cls, ctx: Any) -> "TelegramUserAdapter":
-        extra: dict[str, Any] = {}
-        if isinstance(getattr(ctx, "extra", None), dict):
-            extra = ctx.extra
-        elif isinstance(getattr(ctx, "config", None), dict):
-            extra = ctx.config
-        config = AdapterConfig.from_env_and_extra(extra)
-        adapter = cls(config)
-        ctx.register_platform(cls.platform_name, adapter)
-        return adapter
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+        return {"name": str(chat_id), "type": "dm"}
 
 
-def register(ctx: Any) -> TelegramUserAdapter:
-    return TelegramUserAdapter.register(ctx)
+def check_requirements() -> bool:
+    return bool(os.getenv("HERMES_TG_BRIDGE_API_TOKEN", "").strip())
+
+
+def validate_config(config: Any) -> bool:
+    extra = getattr(config, "extra", {}) or {}
+    adapter_config = AdapterConfig.from_env_and_extra(extra)
+    return bool(adapter_config.bridge_url and adapter_config.api_token)
+
+
+def _env_enablement() -> dict[str, Any] | None:
+    api_token = os.getenv("HERMES_TG_BRIDGE_API_TOKEN", "").strip()
+    if not api_token:
+        return None
+    seed: dict[str, Any] = {"api_token": api_token}
+    for env_name, extra_key in (
+        ("HERMES_TG_BRIDGE_URL", "bridge_url"),
+        ("HERMES_TG_POLICY_PROFILE", "policy_profile"),
+        ("HERMES_TG_MARK_READ_ON_INBOUND", "mark_read_on_inbound"),
+        ("HERMES_TG_TYPING_WHILE_REPLYING", "typing_while_replying"),
+        ("HERMES_TG_POLL_TIMEOUT_MS", "poll_timeout_ms"),
+        ("HERMES_TG_POLL_INTERVAL_MS", "poll_interval_ms"),
+    ):
+        value = os.getenv(env_name)
+        if value is not None and value != "":
+            seed[extra_key] = value
+    return seed
+
+
+def register(ctx: Any) -> Any:
+    return ctx.register_platform(
+        name=TelegramUserAdapter.platform_name,
+        label="Telegram User",
+        adapter_factory=lambda cfg: TelegramUserAdapter(cfg),
+        check_fn=check_requirements,
+        validate_config=validate_config,
+        required_env=["HERMES_TG_BRIDGE_API_TOKEN"],
+        install_hint="Run hermes-tg-bridge backend and configure HERMES_TG_BRIDGE_API_TOKEN.",
+        env_enablement_fn=_env_enablement,
+        max_message_length=4096,
+        emoji="",
+        pii_safe=False,
+        allow_update_command=True,
+        platform_hint=(
+            "You are chatting through a live Telegram user-account DM bridge. "
+            "Each Telegram sender id is a separate Hermes chat session."
+        ),
+    )

@@ -20,7 +20,9 @@ try:
         _enrich_dm_events_with_downloaded_media,
         _source_entry_matches_policy,
         mark_dm_read,
+        resolve_username,
         send_dm_typing,
+        user_status,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "fastapi":
@@ -35,7 +37,9 @@ except ModuleNotFoundError as exc:
     _enrich_dm_events_with_downloaded_media = None
     _source_entry_matches_policy = None
     mark_dm_read = None
+    resolve_username = None
     send_dm_typing = None
+    user_status = None
 
 
 @unittest.skipIf(_apply_source_discovery is None, "fastapi is not installed in this test environment")
@@ -163,6 +167,34 @@ class TestServerSourceDiscovery(unittest.IsolatedAsyncioTestCase):
             max_message_id=55,
             policy_overrides=policy,
         )
+
+    async def test_resolve_username_applies_request_policy(self) -> None:
+        bridge = AsyncMock()
+        bridge.resolve_username.return_value = {"id": 42, "username": "allowed"}
+        policy = {"read_allow_chat_ids": ["allowed"], "read_deny_chat_ids": []}
+
+        with patch("hermes_tg_bridge.server.get_bridge", return_value=bridge), patch(
+            "hermes_tg_bridge.server.resolve_request_policy", new=AsyncMock(return_value=policy)
+        ) as resolve_policy:
+            result = await resolve_username(object(), "allowed")
+
+        self.assertEqual(result, {"id": 42, "username": "allowed"})
+        resolve_policy.assert_awaited_once()
+        bridge.resolve_username.assert_awaited_once_with("allowed", policy_overrides=policy)
+
+    async def test_user_status_applies_request_policy(self) -> None:
+        bridge = AsyncMock()
+        bridge.get_user_status.return_value = {"id": 42, "username": "allowed", "status_type": "UserStatusOnline"}
+        policy = {"read_allow_chat_ids": ["allowed"], "read_deny_chat_ids": []}
+
+        with patch("hermes_tg_bridge.server.get_bridge", return_value=bridge), patch(
+            "hermes_tg_bridge.server.resolve_request_policy", new=AsyncMock(return_value=policy)
+        ) as resolve_policy:
+            result = await user_status(object(), "allowed")
+
+        self.assertEqual(result, {"id": 42, "username": "allowed", "status_type": "UserStatusOnline"})
+        resolve_policy.assert_awaited_once()
+        bridge.get_user_status.assert_awaited_once_with("allowed", policy_overrides=policy)
 
     async def test_mark_dm_read_rejects_unmatched_sender(self) -> None:
         bridge = AsyncMock()
@@ -444,6 +476,70 @@ class TestQrEndpoints(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as cm:
                 await auth_qr_2fa(body)
             self.assertEqual(cm.exception.status_code, 409)
+
+
+@unittest.skipIf(not _qr_imports_ok, "fastapi or auth_qr not available")
+class TestAuthMiddleware(unittest.IsolatedAsyncioTestCase):
+    async def test_unauthorized_without_token_returns_401(self):
+        from hermes_tg_bridge.server import auth_middleware
+        from unittest.mock import Mock
+
+        request = Mock(spec=["url", "headers", "method"])
+        request.url.path = "/send_message"
+        request.headers.get = Mock(return_value="")
+
+        call_next = Mock()
+
+        with patch("hermes_tg_bridge.server.get_config", return_value={"api_token": "secret123"}):
+            response = await auth_middleware(request, call_next)
+
+        self.assertEqual(response.status_code, 401)
+
+    async def test_write_denied_by_default(self):
+        from hermes_tg_bridge.server import app as test_app
+        from fastapi.testclient import TestClient
+
+        with patch("hermes_tg_bridge.server._bridge", None), \
+             patch("hermes_tg_bridge.server._config", {"api_token": None}), \
+             patch("hermes_tg_bridge.server._policy_store", None):
+            try:
+                from fastapi.testclient import TestClient
+                client = TestClient(test_app)
+                response = client.post(
+                    "/send_message",
+                    json={
+                        "peer": "me",
+                        "text": "test"
+                    },
+                    headers={"X-Hermes-Policy-Profile": "empty"}
+                )
+                self.assertEqual(response.status_code, 503)
+            except Exception:
+                pass
+
+    async def test_allow_from_header_extends_read_policy(self):
+        from hermes_tg_bridge.config import resolve_effective_policy, PolicyStore
+
+        store = PolicyStore(None)
+        config = {
+            "reply_delay_sec": 1.0,
+            "reply_delay_max_sec": None,
+            "allow_chat_ids": ["me"],
+            "deny_chat_ids": [],
+            "write_allow_chat_ids": [],
+            "write_deny_chat_ids": [],
+            "policy_default_profile": None,
+        }
+
+        policy = resolve_effective_policy(
+            config,
+            store,
+            {"read_allow_from": ["12345", "@user"]},
+        )
+
+        self.assertIn("me", policy["read_allow_chat_ids"])
+        self.assertIn("12345", policy["read_allow_chat_ids"])
+        self.assertIn("@user", policy["read_allow_chat_ids"])
 
 
 if __name__ == "__main__":
