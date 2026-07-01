@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from hermes_tg_bridge.client import BridgeValidationError
 from hermes_tg_bridge.state import SourceInventoryStore
@@ -14,14 +14,19 @@ try:
         AllowedDmSender,
         DmPeerBody,
         HTTPException,
+        SendMessageBody,
+        SendRateLimiter,
         _apply_source_discovery,
         _guess_dm_media_extension,
+        _idempotency_cache,
         _recover_dm_events,
         _enrich_dm_events_with_downloaded_media,
+        _send_rate_limiter,
         _source_entry_matches_policy,
         mark_dm_read,
         resolve_username,
         send_dm_typing,
+        send_message,
         user_status,
     )
 except ModuleNotFoundError as exc:
@@ -31,14 +36,19 @@ except ModuleNotFoundError as exc:
     AllowedDmSender = None
     DmPeerBody = None
     HTTPException = None
+    SendMessageBody = None
+    SendRateLimiter = None
     _apply_source_discovery = None
     _guess_dm_media_extension = None
+    _idempotency_cache = None
     _recover_dm_events = None
     _enrich_dm_events_with_downloaded_media = None
+    _send_rate_limiter = None
     _source_entry_matches_policy = None
     mark_dm_read = None
     resolve_username = None
     send_dm_typing = None
+    send_message = None
     user_status = None
 
 
@@ -385,6 +395,57 @@ class TestServerSourceDiscovery(unittest.IsolatedAsyncioTestCase):
         bridge.download_media_for_inbox.assert_not_awaited()
 
 
+@unittest.skipIf(send_message is None, "fastapi is not installed in this test environment")
+class TestSendMessageSafety(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Each test gets an isolated cache/limiter so runs don't leak state between tests.
+        _idempotency_cache._entries.clear()
+        _send_rate_limiter._timestamps.clear()
+
+    def _make_request(self, idempotency_key: str | None = None) -> Mock:
+        request = Mock(spec=["url", "headers", "method"])
+        headers = {}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
+        request.headers.get = Mock(side_effect=lambda name, default=None: headers.get(name, default))
+        return request
+
+    async def test_repeated_idempotency_key_does_not_call_telegram_twice(self) -> None:
+        bridge = AsyncMock()
+        bridge.send_message.return_value = {"ok": True, "message_id": 42}
+        policy = {}
+
+        with patch("hermes_tg_bridge.server.get_bridge", return_value=bridge), patch(
+            "hermes_tg_bridge.server.resolve_request_policy", new=AsyncMock(return_value=policy)
+        ):
+            request = self._make_request(idempotency_key="dup-key-1")
+            body = SendMessageBody(peer="me", text="hello")
+            first = await send_message(request, body)
+            second = await send_message(request, body)
+
+        self.assertEqual(first, {"ok": True, "message_id": 42})
+        self.assertEqual(second, {"ok": True, "message_id": 42})
+        bridge.send_message.assert_awaited_once()
+
+    async def test_send_rate_limit_returns_429_without_calling_telegram(self) -> None:
+        bridge = AsyncMock()
+        bridge.send_message.return_value = {"ok": True, "message_id": 1}
+        policy = {}
+
+        with patch("hermes_tg_bridge.server.get_bridge", return_value=bridge), patch(
+            "hermes_tg_bridge.server.resolve_request_policy", new=AsyncMock(return_value=policy)
+        ), patch("hermes_tg_bridge.server._send_rate_limiter", SendRateLimiter(max_per_min=1)):
+            body = SendMessageBody(peer="me", text="hello")
+            await send_message(self._make_request(), body)
+
+            with self.assertRaises(HTTPException) as ctx:
+                await send_message(self._make_request(), body)
+
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertIn("Retry-After", ctx.exception.headers)
+        bridge.send_message.assert_awaited_once()
+
+
 try:
     from hermes_tg_bridge.server import (
         _BridgeNotReadyError,
@@ -517,7 +578,7 @@ class TestAuthMiddleware(unittest.IsolatedAsyncioTestCase):
             except Exception:
                 pass
 
-    async def test_allow_from_header_extends_read_policy(self):
+    async def test_allow_from_header_narrows_read_policy(self):
         from hermes_tg_bridge.config import resolve_effective_policy, PolicyStore
 
         store = PolicyStore(None)
@@ -531,15 +592,23 @@ class TestAuthMiddleware(unittest.IsolatedAsyncioTestCase):
             "policy_default_profile": None,
         }
 
+        # The header must only narrow the base allowlist (intersection), never
+        # add chat ids beyond what policy.json/ENV already permits.
         policy = resolve_effective_policy(
             config,
             store,
             {"read_allow_from": ["12345", "@user"]},
         )
 
-        self.assertIn("me", policy["read_allow_chat_ids"])
-        self.assertIn("12345", policy["read_allow_chat_ids"])
-        self.assertIn("@user", policy["read_allow_chat_ids"])
+        self.assertEqual(policy["read_allow_chat_ids"], [])
+
+        policy_with_overlap = resolve_effective_policy(
+            config,
+            store,
+            {"read_allow_from": ["me", "@user"]},
+        )
+
+        self.assertEqual(policy_with_overlap["read_allow_chat_ids"], ["me"])
 
 
 if __name__ == "__main__":

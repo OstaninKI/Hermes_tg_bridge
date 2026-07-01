@@ -69,9 +69,26 @@ python3 -m hermes_tg_bridge.auth_qr
 - backend binds only to `127.0.0.1`;
 - API token обязателен для deployed setup;
 - read/write allowlists задаются только в backend policy, а не в plugin config;
+- request-заголовки `X-Hermes-Allow-From` / `X-Hermes-Write-To` могут только **сузить** backend allowlist (пересечение), но не расширить его сверх policy;
+- исходящие отправки ограничены app-level rate-limit (`TELEGRAM_MAX_SENDS_PER_MIN`, default 25) поверх реактивной FloodWait-защиты;
 - `mark_read_on_inbound` включен только если это ожидаемое поведение;
 - Telegram session/state хранится в выделенной service-owned директории;
 - policy должен явно ограничивать read/write peers.
+
+## Backend tuning env
+
+Все опциональны, с безопасными дефолтами. Задаются в systemd `EnvironmentFile`/`Environment`.
+
+- `TELEGRAM_MAX_SENDS_PER_MIN` - жёсткий предел исходящих отправок в минуту на процесс, default `25` (предохранитель от runaway-агента);
+- `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` - до скольких секунд FloodWait backend ждёт и ретраит сам, прежде чем вернуть `429 Retry-After`, default `30`;
+- `TELEGRAM_IDEMPOTENCY_TTL_SEC` - TTL кэша идемпотентности отправок, default `600`;
+- `TELEGRAM_IDEMPOTENCY_MAX_KEYS` - размер кэша идемпотентности, default `1000`;
+- `HERMES_QR_PASSWORD_TIMEOUT` - таймаут ожидания 2FA-пароля в QR-авторизации, секунды, default `180`;
+- `TELEGRAM_DISABLE_EXTENDED_API=1` - отключить расширенные (не-core) операции.
+
+### Idempotency
+
+Send-эндпоинты (`send_message`, `send_file`, `send_voice`, `send_sticker`, `send_location`) принимают опциональный заголовок `Idempotency-Key`. Повторный запрос с тем же ключом в пределах TTL возвращает закэшированный ответ и не шлёт сообщение в Telegram повторно. Кэш in-memory per-process (теряется при рестарте; при мультиинстансе нужен shared store).
 
 ## Extended API
 

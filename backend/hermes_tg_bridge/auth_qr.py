@@ -32,6 +32,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ponytail: how long to wait for the 2FA password after a QR scan before giving up
+# and letting the caller close the Telethon connection (avoids a task hanging forever).
+QR_PASSWORD_TIMEOUT_SECONDS = float(os.environ.get("HERMES_QR_PASSWORD_TIMEOUT", "180"))
+
 
 # ---------------------------------------------------------------------------
 # Public state types
@@ -158,7 +162,15 @@ async def run_qr_login_flow(client: Any, ctx: QrAuthContext) -> None:
                 # QR was scanned but account has 2FA – retry until correct.
                 ctx.state = QrState.AWAITING_PASSWORD
                 while True:
-                    password = await ctx._password_queue.get()
+                    try:
+                        password = await asyncio.wait_for(
+                            ctx._password_queue.get(), timeout=QR_PASSWORD_TIMEOUT_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(
+                            f"Timed out after {QR_PASSWORD_TIMEOUT_SECONDS:.0f}s waiting for"
+                            " 2FA password"
+                        ) from None
                     try:
                         await client.sign_in(password=password)
                         break

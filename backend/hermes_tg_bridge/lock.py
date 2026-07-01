@@ -31,21 +31,32 @@ class ProcessLock:
         if self._path is None or self._acquired:
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        if self._path.exists():
+        # ponytail: O_CREAT|O_EXCL makes file creation atomic, so two processes
+        # racing to acquire the lock can't both believe they own it. On EEXIST
+        # we inspect the stale file and retry a bounded number of times.
+        for _ in range(5):
             try:
-                raw_pid = self._path.read_text(encoding="utf-8").strip()
-            except OSError:
-                raw_pid = ""
-            if raw_pid.isdigit() and _pid_alive(int(raw_pid)):
-                raise ProcessLockError(
-                    f"Bridge lock is already held by PID {raw_pid}: {self._path}"
-                )
-            try:
-                self._path.unlink()
-            except OSError:
-                pass
-        self._path.write_text(f"{os.getpid()}\n", encoding="utf-8")
-        self._acquired = True
+                fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    raw_pid = self._path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    raw_pid = ""
+                if raw_pid.isdigit() and _pid_alive(int(raw_pid)):
+                    raise ProcessLockError(
+                        f"Bridge lock is already held by PID {raw_pid}: {self._path}"
+                    )
+                try:
+                    self._path.unlink()
+                except OSError:
+                    pass
+                continue
+            else:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(f"{os.getpid()}\n")
+                self._acquired = True
+                return
+        raise ProcessLockError(f"Could not acquire bridge lock: {self._path}")
 
     def release(self) -> None:
         if self._path is None or not self._acquired:

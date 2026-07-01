@@ -789,7 +789,7 @@ class BridgeClient:
         write_allow_chat_ids: list[str] | None = None,
         write_deny_chat_ids: list[str] | None = None,
         rpc_timeout_sec: float = 30.0,
-        flood_wait_max_sleep_sec: float = 3.0,
+        flood_wait_max_sleep_sec: float = 30.0,
         allowed_file_roots: list[str] | None = None,
         media_download_root: str | None = None,
     ) -> None:
@@ -1663,20 +1663,22 @@ class BridgeClient:
             raise BridgeValidationError("phone and first_name are required.")
         functions = _telethon_functions()
         types = _telethon_types()
-        result = await self._call_telegram(
-            self._client.__call__,
-            functions.contacts.ImportContactsRequest(
-                contacts=[
-                    types.InputPhoneContact(
-                        client_id=random.getrandbits(63),
-                        phone=phone,
-                        first_name=first_name,
-                        last_name=(last_name or "").strip(),
-                    )
-                ]
-            ),
-            action="add a contact",
-        )
+        async with self._send_lock:
+            await self._delay_before_write(policy)
+            result = await self._call_telegram(
+                self._client.__call__,
+                functions.contacts.ImportContactsRequest(
+                    contacts=[
+                        types.InputPhoneContact(
+                            client_id=random.getrandbits(63),
+                            phone=phone,
+                            first_name=first_name,
+                            last_name=(last_name or "").strip(),
+                        )
+                    ]
+                ),
+                action="add a contact",
+            )
         user = (getattr(result, "users", None) or [None])[0]
         return {
             "ok": True,
@@ -1696,17 +1698,19 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing is not allowed for deleting contacts.")
-        entity, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        functions = _telethon_functions()
-        await self._call_telegram(
-            self._client.__call__,
-            functions.contacts.DeleteContactsRequest(id=[entity]),
-            action="delete a contact",
-        )
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            await self._call_telegram(
+                self._client.__call__,
+                functions.contacts.DeleteContactsRequest(id=[entity]),
+                action="delete a contact",
+            )
         return {"ok": True}
 
     async def block_user(
@@ -1717,17 +1721,19 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing is not allowed for blocking users.")
-        entity, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        functions = _telethon_functions()
-        await self._call_telegram(
-            self._client.__call__,
-            functions.contacts.BlockRequest(id=entity),
-            action="block a user",
-        )
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            await self._call_telegram(
+                self._client.__call__,
+                functions.contacts.BlockRequest(id=entity),
+                action="block a user",
+            )
         return {"ok": True}
 
     async def unblock_user(
@@ -1738,17 +1744,19 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing is not allowed for unblocking users.")
-        entity, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        functions = _telethon_functions()
-        await self._call_telegram(
-            self._client.__call__,
-            functions.contacts.UnblockRequest(id=entity),
-            action="unblock a user",
-        )
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            await self._call_telegram(
+                self._client.__call__,
+                functions.contacts.UnblockRequest(id=entity),
+                action="unblock a user",
+            )
         return {"ok": True}
 
     async def get_blocked_users(
@@ -1792,20 +1800,22 @@ class BridgeClient:
         title = title.strip()
         if not title:
             raise BridgeValidationError("title is required.")
-        user_entities: list[Any] = []
-        for user in users:
-            entity, _ = await self._resolve_scoped_entity(
-                user,
-                action="writing",
-                scope=policy.write_scope,
+        async with self._send_lock:
+            user_entities: list[Any] = []
+            for user in users:
+                entity, _ = await self._resolve_scoped_entity(
+                    user,
+                    action="writing",
+                    scope=policy.write_scope,
+                )
+                user_entities.append(entity)
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            result = await self._call_telegram(
+                self._client.__call__,
+                functions.messages.CreateChatRequest(title=title, users=user_entities),
+                action="create a group",
             )
-            user_entities.append(entity)
-        functions = _telethon_functions()
-        result = await self._call_telegram(
-            self._client.__call__,
-            functions.messages.CreateChatRequest(title=title, users=user_entities),
-            action="create a group",
-        )
         chats = getattr(result, "chats", None) or []
         chat = chats[0] if chats else None
         return {"ok": True, "chat_id": getattr(chat, "id", None), "title": getattr(chat, "title", title)}
@@ -1824,17 +1834,19 @@ class BridgeClient:
         if not title:
             raise BridgeValidationError("title is required.")
         is_megagroup = bool(megagroup)
-        functions = _telethon_functions()
-        result = await self._call_telegram(
-            self._client.__call__,
-            functions.channels.CreateChannelRequest(
-                title=title,
-                about=(about or "").strip(),
-                broadcast=not is_megagroup,
-                megagroup=is_megagroup,
-            ),
-            action="create a channel",
-        )
+        async with self._send_lock:
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            result = await self._call_telegram(
+                self._client.__call__,
+                functions.channels.CreateChannelRequest(
+                    title=title,
+                    about=(about or "").strip(),
+                    broadcast=not is_megagroup,
+                    megagroup=is_megagroup,
+                ),
+                action="create a channel",
+            )
         chats = getattr(result, "chats", None) or []
         chat = chats[0] if chats else None
         return {"ok": True, "chat_id": getattr(chat, "id", None), "title": getattr(chat, "title", title)}
@@ -1848,37 +1860,39 @@ class BridgeClient:
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
         _require_self_write(policy.write_scope, detail="Writing is not allowed for inviting users.")
-        entity, _ = await self._resolve_scoped_entity(
-            peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        user_entities: list[Any] = []
-        for user in users:
-            user_entity, _ = await self._resolve_scoped_entity(
-                user,
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                peer,
                 action="writing",
                 scope=policy.write_scope,
             )
-            user_entities.append(user_entity)
-        functions = _telethon_functions()
-        if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
-            await self._call_telegram(
-                self._client.__call__,
-                functions.channels.InviteToChannelRequest(channel=entity, users=user_entities),
-                action="invite users to a channel",
-            )
-        else:
-            for user in user_entities:
+            user_entities: list[Any] = []
+            for user in users:
+                user_entity, _ = await self._resolve_scoped_entity(
+                    user,
+                    action="writing",
+                    scope=policy.write_scope,
+                )
+                user_entities.append(user_entity)
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
                 await self._call_telegram(
                     self._client.__call__,
-                    functions.messages.AddChatUserRequest(
-                        chat_id=getattr(entity, "id", None),
-                        user_id=user,
-                        fwd_limit=50,
-                    ),
-                    action="invite users to a group",
+                    functions.channels.InviteToChannelRequest(channel=entity, users=user_entities),
+                    action="invite users to a channel",
                 )
+            else:
+                for user in user_entities:
+                    await self._call_telegram(
+                        self._client.__call__,
+                        functions.messages.AddChatUserRequest(
+                            chat_id=getattr(entity, "id", None),
+                            user_id=user,
+                            fwd_limit=50,
+                        ),
+                        action="invite users to a group",
+                    )
         return {"ok": True, "invited_count": len(user_entities)}
 
     async def get_invite_link(
@@ -1952,11 +1966,13 @@ class BridgeClient:
             raise BridgeValidationError("link is invalid.")
 
         if target_type == "invite":
-            result = await self._call_telegram(
-                self._client.__call__,
-                functions.messages.ImportChatInviteRequest(hash=target_value),
-                action="join a chat by invite link",
-            )
+            async with self._send_lock:
+                await self._delay_before_write(policy)
+                result = await self._call_telegram(
+                    self._client.__call__,
+                    functions.messages.ImportChatInviteRequest(hash=target_value),
+                    action="join a chat by invite link",
+                )
             chats = getattr(result, "chats", None) or []
             chat = chats[0] if chats else None
             return {"ok": True, "chat_id": getattr(chat, "id", None), "title": getattr(chat, "title", None), "join_type": "invite"}
@@ -1972,11 +1988,13 @@ class BridgeClient:
                 "join_type": "public",
                 "already_joined": True,
             }
-        result = await self._call_telegram(
-            self._client.__call__,
-            functions.channels.JoinChannelRequest(channel=entity),
-            action="join a public chat",
-        )
+        async with self._send_lock:
+            await self._delay_before_write(policy)
+            result = await self._call_telegram(
+                self._client.__call__,
+                functions.channels.JoinChannelRequest(channel=entity),
+                action="join a public chat",
+            )
         chats = getattr(result, "chats", None) or []
         chat = chats[0] if chats else entity
         return {
@@ -2328,62 +2346,64 @@ class BridgeClient:
         policy_overrides: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
-        entity, _ = await self._resolve_scoped_entity(
-            peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        user, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        functions = _telethon_functions()
-        if _is_basic_group(entity):
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            user, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            if _is_basic_group(entity):
+                await self._call_telegram(
+                    self._client.__call__,
+                    functions.messages.EditChatAdminRequest(
+                        chat_id=getattr(entity, "id", None),
+                        user_id=user,
+                        is_admin=True,
+                    ),
+                    action="promote an admin",
+                )
+                return {"ok": True}
+            if not _is_channel_like(entity):
+                raise BridgeValidationError("Admin promotion is supported only for groups, supergroups, and channels.")
+            types = _telethon_types()
+            rights = _build_tl_object(
+                types.ChatAdminRights,
+                object_name="admin rights",
+                change_info=True,
+                post_messages=True,
+                edit_messages=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                add_admins=False,
+                anonymous=False,
+                manage_call=True,
+                other=True,
+                manage_topics=manage_topics,
+                post_stories=post_stories,
+                edit_stories=edit_stories,
+                delete_stories=delete_stories,
+                manage_direct_messages=manage_direct_messages,
+            )
             await self._call_telegram(
                 self._client.__call__,
-                functions.messages.EditChatAdminRequest(
-                    chat_id=getattr(entity, "id", None),
+                functions.channels.EditAdminRequest(
+                    channel=entity,
                     user_id=user,
-                    is_admin=True,
+                    admin_rights=rights,
+                    rank=(title or "").strip() or "Admin",
                 ),
                 action="promote an admin",
             )
             return {"ok": True}
-        if not _is_channel_like(entity):
-            raise BridgeValidationError("Admin promotion is supported only for groups, supergroups, and channels.")
-        types = _telethon_types()
-        rights = _build_tl_object(
-            types.ChatAdminRights,
-            object_name="admin rights",
-            change_info=True,
-            post_messages=True,
-            edit_messages=True,
-            delete_messages=True,
-            ban_users=True,
-            invite_users=True,
-            pin_messages=True,
-            add_admins=False,
-            anonymous=False,
-            manage_call=True,
-            other=True,
-            manage_topics=manage_topics,
-            post_stories=post_stories,
-            edit_stories=edit_stories,
-            delete_stories=delete_stories,
-            manage_direct_messages=manage_direct_messages,
-        )
-        await self._call_telegram(
-            self._client.__call__,
-            functions.channels.EditAdminRequest(
-                channel=entity,
-                user_id=user,
-                admin_rights=rights,
-                rank=(title or "").strip() or "Admin",
-            ),
-            action="promote an admin",
-        )
-        return {"ok": True}
 
     async def demote_admin(
         self,
@@ -2393,62 +2413,64 @@ class BridgeClient:
         policy_overrides: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
-        entity, _ = await self._resolve_scoped_entity(
-            peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        user, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        functions = _telethon_functions()
-        if _is_basic_group(entity):
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            user, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            if _is_basic_group(entity):
+                await self._call_telegram(
+                    self._client.__call__,
+                    functions.messages.EditChatAdminRequest(
+                        chat_id=getattr(entity, "id", None),
+                        user_id=user,
+                        is_admin=False,
+                    ),
+                    action="demote an admin",
+                )
+                return {"ok": True}
+            if not _is_channel_like(entity):
+                raise BridgeValidationError("Admin demotion is supported only for groups, supergroups, and channels.")
+            types = _telethon_types()
+            rights = _build_tl_object(
+                types.ChatAdminRights,
+                object_name="admin rights",
+                change_info=False,
+                post_messages=False,
+                edit_messages=False,
+                delete_messages=False,
+                ban_users=False,
+                invite_users=False,
+                pin_messages=False,
+                add_admins=False,
+                anonymous=False,
+                manage_call=False,
+                other=False,
+                manage_topics=False,
+                post_stories=False,
+                edit_stories=False,
+                delete_stories=False,
+                manage_direct_messages=False,
+            )
             await self._call_telegram(
                 self._client.__call__,
-                functions.messages.EditChatAdminRequest(
-                    chat_id=getattr(entity, "id", None),
+                functions.channels.EditAdminRequest(
+                    channel=entity,
                     user_id=user,
-                    is_admin=False,
+                    admin_rights=rights,
+                    rank="",
                 ),
                 action="demote an admin",
             )
             return {"ok": True}
-        if not _is_channel_like(entity):
-            raise BridgeValidationError("Admin demotion is supported only for groups, supergroups, and channels.")
-        types = _telethon_types()
-        rights = _build_tl_object(
-            types.ChatAdminRights,
-            object_name="admin rights",
-            change_info=False,
-            post_messages=False,
-            edit_messages=False,
-            delete_messages=False,
-            ban_users=False,
-            invite_users=False,
-            pin_messages=False,
-            add_admins=False,
-            anonymous=False,
-            manage_call=False,
-            other=False,
-            manage_topics=False,
-            post_stories=False,
-            edit_stories=False,
-            delete_stories=False,
-            manage_direct_messages=False,
-        )
-        await self._call_telegram(
-            self._client.__call__,
-            functions.channels.EditAdminRequest(
-                channel=entity,
-                user_id=user,
-                admin_rights=rights,
-                rank="",
-            ),
-            action="demote an admin",
-        )
-        return {"ok": True}
 
     async def ban_user(
         self,
@@ -2467,55 +2489,57 @@ class BridgeClient:
         policy_overrides: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
-        entity, _ = await self._resolve_scoped_entity(
-            peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        user, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        self._require_channel_like(entity, action="banning users")
-        functions = _telethon_functions()
-        types = _telethon_types()
-        rights = _build_tl_object(
-            types.ChatBannedRights,
-            object_name="ban rights",
-            keep_none=frozenset({"until_date"}),
-            until_date=until_date,
-            view_messages=True,
-            send_messages=True,
-            send_media=True,
-            send_stickers=True,
-            send_gifs=True,
-            send_games=True,
-            send_inline=True,
-            embed_links=True,
-            send_polls=True,
-            change_info=True,
-            invite_users=True,
-            pin_messages=True,
-            manage_topics=True if manage_topics is None else manage_topics,
-            send_photos=True if send_photos is None else send_photos,
-            send_videos=True if send_videos is None else send_videos,
-            send_roundvideos=True if send_roundvideos is None else send_roundvideos,
-            send_audios=True if send_audios is None else send_audios,
-            send_voices=True if send_voices is None else send_voices,
-            send_docs=True if send_docs is None else send_docs,
-            send_plain=True if send_plain is None else send_plain,
-        )
-        await self._call_telegram(
-            self._client.__call__,
-            functions.channels.EditBannedRequest(
-                channel=entity,
-                participant=user,
-                banned_rights=rights,
-            ),
-            action="ban a user",
-        )
-        return {"ok": True}
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            user, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            self._require_channel_like(entity, action="banning users")
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            types = _telethon_types()
+            rights = _build_tl_object(
+                types.ChatBannedRights,
+                object_name="ban rights",
+                keep_none=frozenset({"until_date"}),
+                until_date=until_date,
+                view_messages=True,
+                send_messages=True,
+                send_media=True,
+                send_stickers=True,
+                send_gifs=True,
+                send_games=True,
+                send_inline=True,
+                embed_links=True,
+                send_polls=True,
+                change_info=True,
+                invite_users=True,
+                pin_messages=True,
+                manage_topics=True if manage_topics is None else manage_topics,
+                send_photos=True if send_photos is None else send_photos,
+                send_videos=True if send_videos is None else send_videos,
+                send_roundvideos=True if send_roundvideos is None else send_roundvideos,
+                send_audios=True if send_audios is None else send_audios,
+                send_voices=True if send_voices is None else send_voices,
+                send_docs=True if send_docs is None else send_docs,
+                send_plain=True if send_plain is None else send_plain,
+            )
+            await self._call_telegram(
+                self._client.__call__,
+                functions.channels.EditBannedRequest(
+                    channel=entity,
+                    participant=user,
+                    banned_rights=rights,
+                ),
+                action="ban a user",
+            )
+            return {"ok": True}
 
     async def unban_user(
         self,
@@ -2525,55 +2549,57 @@ class BridgeClient:
         policy_overrides: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         policy = self._resolve_policy(policy_overrides)
-        entity, _ = await self._resolve_scoped_entity(
-            peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        user, _ = await self._resolve_scoped_entity(
-            user_peer,
-            action="writing",
-            scope=policy.write_scope,
-        )
-        self._require_channel_like(entity, action="unbanning users")
-        functions = _telethon_functions()
-        types = _telethon_types()
-        rights = _build_tl_object(
-            types.ChatBannedRights,
-            object_name="ban rights",
-            keep_none=frozenset({"until_date"}),
-            until_date=None,
-            view_messages=False,
-            send_messages=False,
-            send_media=False,
-            send_stickers=False,
-            send_gifs=False,
-            send_games=False,
-            send_inline=False,
-            embed_links=False,
-            send_polls=False,
-            change_info=False,
-            invite_users=False,
-            pin_messages=False,
-            manage_topics=False,
-            send_photos=False,
-            send_videos=False,
-            send_roundvideos=False,
-            send_audios=False,
-            send_voices=False,
-            send_docs=False,
-            send_plain=False,
-        )
-        await self._call_telegram(
-            self._client.__call__,
-            functions.channels.EditBannedRequest(
-                channel=entity,
-                participant=user,
-                banned_rights=rights,
-            ),
-            action="unban a user",
-        )
-        return {"ok": True}
+        async with self._send_lock:
+            entity, _ = await self._resolve_scoped_entity(
+                peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            user, _ = await self._resolve_scoped_entity(
+                user_peer,
+                action="writing",
+                scope=policy.write_scope,
+            )
+            self._require_channel_like(entity, action="unbanning users")
+            await self._delay_before_write(policy)
+            functions = _telethon_functions()
+            types = _telethon_types()
+            rights = _build_tl_object(
+                types.ChatBannedRights,
+                object_name="ban rights",
+                keep_none=frozenset({"until_date"}),
+                until_date=None,
+                view_messages=False,
+                send_messages=False,
+                send_media=False,
+                send_stickers=False,
+                send_gifs=False,
+                send_games=False,
+                send_inline=False,
+                embed_links=False,
+                send_polls=False,
+                change_info=False,
+                invite_users=False,
+                pin_messages=False,
+                manage_topics=False,
+                send_photos=False,
+                send_videos=False,
+                send_roundvideos=False,
+                send_audios=False,
+                send_voices=False,
+                send_docs=False,
+                send_plain=False,
+            )
+            await self._call_telegram(
+                self._client.__call__,
+                functions.channels.EditBannedRequest(
+                    channel=entity,
+                    participant=user,
+                    banned_rights=rights,
+                ),
+                action="unban a user",
+            )
+            return {"ok": True}
 
     async def get_chat(
         self,

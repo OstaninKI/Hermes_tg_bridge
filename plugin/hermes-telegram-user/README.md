@@ -23,6 +23,10 @@ Platform name: `telegram_user`
 
 `gateway.platforms.telegram_user.extra` can provide the same settings as fallback values, but env vars win.
 
+## Installation / discovery
+
+Hermes находит directory-based плагин по регистрозависимому манифесту `plugin.yaml` и `__init__.py` с функцией `register(ctx)`. Разместите директорию плагина в `~/.hermes/plugins/hermes-telegram-user/` (или `./.hermes/plugins/`), сохранив оба файла — `plugin.yaml` и `__init__.py` (реэкспортит `register` из `adapter.py`).
+
 ## Notes
 
 The plugin is intentionally small. It implements Hermes' `BasePlatformAdapter` plugin contract, polls the backend for inbound DMs, forwards accepted messages into Hermes as `MessageEvent` values, and sends replies back through the backend as `SendResult` values.

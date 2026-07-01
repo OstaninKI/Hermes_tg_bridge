@@ -230,6 +230,36 @@ class TestRunQrLoginFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.state, QrState.DONE)
         self.assertIsNone(ctx.error)
 
+    async def test_2fa_password_timeout(self):
+        """No password ever submitted → wait times out → state=ERROR, reraises."""
+        client = self._make_client()
+        qr_login = self._make_qr_login()
+        qr_login.wait = AsyncMock(side_effect=_FakeSessionPasswordNeededError())
+        client.qr_login = AsyncMock(return_value=qr_login)
+
+        ctx = QrAuthContext()
+        # Never put anything on ctx._password_queue: get() hangs until timeout.
+
+        patch_errors = patch.dict(
+            "sys.modules",
+            {
+                "telethon.errors": MagicMock(
+                    SessionPasswordNeededError=_FakeSessionPasswordNeededError,
+                    PasswordHashInvalidError=_FakePasswordHashInvalidError,
+                )
+            },
+        )
+        with patch_errors, \
+             patch("hermes_tg_bridge.auth_qr.generate_qr_png_b64", return_value=""), \
+             patch("hermes_tg_bridge.auth_qr.generate_qr_ascii", return_value=""), \
+             patch("hermes_tg_bridge.auth_qr.QR_PASSWORD_TIMEOUT_SECONDS", 0.05):
+            with self.assertRaises(TimeoutError):
+                await run_qr_login_flow(client, ctx)
+
+        self.assertEqual(ctx.state, QrState.ERROR)
+        self.assertIn("Timed out", ctx.error)
+        self.assertTrue(ctx._done_event.is_set())
+
     async def test_error_sets_state_and_reraises(self):
         """Unexpected error in wait() → state=ERROR, error message set, exception re-raised."""
         client = self._make_client()

@@ -1056,6 +1056,20 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["chat_id"], 555)
         self.mock_tg.__call__.assert_awaited_once()
 
+    async def test_create_group_applies_write_delay(self) -> None:
+        bridge = self.create_bridge(write_allow_chat_ids=["me", "42"], reply_delay_sec=1)
+        self.mock_tg.get_entity.side_effect = [SimpleNamespace(id=42, username="alice")]
+        functions_ns = SimpleNamespace(
+            messages=SimpleNamespace(CreateChatRequest=lambda **kwargs: {"kind": "create_chat", **kwargs})
+        )
+        self.mock_tg.__call__.return_value = SimpleNamespace(chats=[SimpleNamespace(id=555, title="Ops")])
+
+        with patch("hermes_tg_bridge.client.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            with patch("hermes_tg_bridge.client._telethon_functions", return_value=functions_ns):
+                await bridge.create_group("Ops", ["42"])
+
+        sleep_mock.assert_awaited()
+
     async def test_create_channel_sets_broadcast_for_channels(self) -> None:
         bridge = self.create_bridge(write_allow_chat_ids=["me"])
         functions_ns = SimpleNamespace(

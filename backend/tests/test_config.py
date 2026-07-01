@@ -155,6 +155,44 @@ class TestConfigHelpers(unittest.TestCase):
             self.assertEqual(shared_effective["sources_include_types"], ["channel", "supergroup"])
             self.assertEqual(shared_effective["sources_exclude_usernames"], ["private_feed"])
 
+    def test_header_allow_overrides_can_only_narrow_not_expand(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy_file = Path(temp_dir) / "policy.json"
+            policy_file.write_text(
+                json.dumps(
+                    {
+                        "defaults": {
+                            "read": {"allow": ["me", "-1001"]},
+                            "write": {"allow": ["me"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "reply_delay_sec": 1.0,
+                "reply_delay_max_sec": None,
+                "allow_chat_ids": [],
+                "deny_chat_ids": [],
+                "write_allow_chat_ids": [],
+                "write_deny_chat_ids": [],
+                "policy_default_profile": None,
+            }
+
+            # X-Hermes-Allow-From / X-Hermes-Write-To must only narrow the
+            # policy.json allowlist (intersection), never add chats beyond it.
+            effective = resolve_effective_policy(
+                config,
+                PolicyStore(str(policy_file)),
+                {
+                    "read_allow_from": ["-1001", "attacker_chat"],
+                    "write_allow_to": ["attacker_chat"],
+                },
+            )
+
+            self.assertEqual(effective["read_allow_chat_ids"], ["-1001"])
+            self.assertEqual(effective["write_allow_chat_ids"], [])
+
     def test_deploy_policy_example_matches_policy_store_schema(self) -> None:
         policy_file = Path(__file__).resolve().parents[2] / "deploy" / "policy.json.example"
         policy_data = json.loads(policy_file.read_text(encoding="utf-8"))

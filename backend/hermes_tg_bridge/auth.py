@@ -46,7 +46,7 @@ def main(
     phone_value: str | None = None,
 ) -> None:
     from telethon import TelegramClient
-    from telethon.errors import SessionPasswordNeededError
+    from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
     from telethon.sessions import StringSession
 
     print("Hermes Telegram Bridge — create session locally (do not run on VPS).")
@@ -95,8 +95,14 @@ def main(
             try:
                 await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
             except SessionPasswordNeededError:
-                password = _prompt("2FA password", secret=True)
-                await client.sign_in(password=password)
+                # ponytail: retry until correct, mirrors auth_qr.py's password retry loop
+                while True:
+                    password = _prompt("2FA password", secret=True)
+                    try:
+                        await client.sign_in(password=password)
+                        break
+                    except PasswordHashInvalidError:
+                        print("Incorrect 2FA password, please try again", file=sys.stderr)
 
         me = await client.get_me()
         session_string = StringSession.save(client.session)

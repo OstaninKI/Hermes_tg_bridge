@@ -7,7 +7,7 @@ import mimetypes
 import os
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +53,13 @@ _qr_auth_task: "asyncio.Task | None" = None
 
 # Extended API control
 _EXTENDED_API_DISABLED = os.getenv("TELEGRAM_DISABLE_EXTENDED_API", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Idempotency cache for send_* endpoints (Idempotency-Key header)
+_IDEMPOTENCY_TTL_SEC = float(os.getenv("TELEGRAM_IDEMPOTENCY_TTL_SEC", "600"))
+_IDEMPOTENCY_MAX_KEYS = int(os.getenv("TELEGRAM_IDEMPOTENCY_MAX_KEYS", "1000"))
+
+# App-level outgoing rate limit (independent of Telegram's own FloodWait)
+_MAX_SENDS_PER_MIN = int(os.getenv("TELEGRAM_MAX_SENDS_PER_MIN", "25"))
 
 NON_DOWNLOADABLE_DM_MEDIA_TYPES = frozenset(
     {
@@ -219,6 +226,80 @@ class DmInboxBroker:
             ],
             maxlen=self._events.maxlen,
         )
+
+
+class IdempotencyCache:
+    """Caches responses for write endpoints keyed by client-supplied Idempotency-Key.
+
+    # ponytail: in-memory, per-process, lost on restart. Fine for a single bridge instance
+    # (which is what this whole process model assumes elsewhere, e.g. ProcessLock). If this
+    # ever runs multi-instance behind a load balancer, swap for a shared store (redis, etc).
+    """
+
+    def __init__(self, ttl_sec: float, max_keys: int) -> None:
+        self._ttl_sec = max(1.0, ttl_sec)
+        self._max_keys = max(1, max_keys)
+        self._entries: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+
+    def _evict_expired(self, now: float) -> None:
+        while self._entries:
+            key, (expires_at, _) = next(iter(self._entries.items()))
+            if expires_at > now:
+                break
+            self._entries.popitem(last=False)
+
+    def get(self, key: str) -> tuple[bool, Any]:
+        now = time.monotonic()
+        self._evict_expired(now)
+        entry = self._entries.get(key)
+        if entry is None:
+            return False, None
+        expires_at, value = entry
+        if expires_at <= now:
+            del self._entries[key]
+            return False, None
+        return True, value
+
+    def put(self, key: str, value: Any) -> None:
+        now = time.monotonic()
+        self._evict_expired(now)
+        self._entries[key] = (now + self._ttl_sec, value)
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._max_keys:
+            self._entries.popitem(last=False)
+
+
+class SendRateLimiter:
+    """Fixed-window guard against a runaway agent hammering outgoing sends.
+
+    # ponytail: single global fixed window via a timestamp deque, not a precise per-peer
+    # token bucket. Good enough as a blunt safety cap; if per-peer limits are needed later,
+    # key a dict of deques by normalized peer instead of one shared deque.
+    """
+
+    def __init__(self, max_per_min: int) -> None:
+        self._max_per_min = max(0, max_per_min)
+        self._window_sec = 60.0
+        self._timestamps: deque[float] = deque()
+
+    def check(self) -> float | None:
+        """Return None if a send is allowed (and record it), else seconds to wait."""
+        if self._max_per_min <= 0:
+            return None
+        now = time.monotonic()
+        while self._timestamps and now - self._timestamps[0] >= self._window_sec:
+            self._timestamps.popleft()
+        if len(self._timestamps) >= self._max_per_min:
+            retry_after = self._window_sec - (now - self._timestamps[0])
+            return max(1.0, retry_after)
+        self._timestamps.append(now)
+        return None
+
+
+# These hold no per-lifespan resources (no Telegram connection, no file handles), so unlike
+# _bridge/_config/etc. they don't need lifespan-managed init/teardown; module-level is enough.
+_idempotency_cache = IdempotencyCache(_IDEMPOTENCY_TTL_SEC, _IDEMPOTENCY_MAX_KEYS)
+_send_rate_limiter = SendRateLimiter(_MAX_SENDS_PER_MIN)
 
 
 async def _create_client() -> BridgeClient:
@@ -416,6 +497,36 @@ async def auth_middleware(request: Request, call_next):
 def _ensure_extended_api_enabled() -> None:
     if _EXTENDED_API_DISABLED:
         raise HTTPException(status_code=404, detail="Extended API disabled")
+
+
+_MISSING = object()
+
+
+def _check_send_idempotency(request: Request) -> tuple[str | None, Any]:
+    """Return (key, cached_response). cached_response is _MISSING unless a cache hit occurred."""
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        return None, _MISSING
+    hit, cached = _idempotency_cache.get(key)
+    if hit:
+        return key, cached
+    return key, _MISSING
+
+
+def _check_send_rate_limit() -> None:
+    """Raise 429 (without touching Telegram) if the app-level outgoing send limit is exceeded.
+
+    # ponytail: this is a blunt safety cap against a runaway agent, not traffic shaping.
+    # Telegram's own FloodWait handling in client.py remains the source of truth for what
+    # Telegram will actually tolerate; this just fails fast before we even try.
+    """
+    retry_after = _send_rate_limiter.check()
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="Outgoing message rate limit exceeded for this bridge.",
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
 
 
 class SendMessageBody(BaseModel):
@@ -923,6 +1034,10 @@ async def _enrich_dm_events_with_downloaded_media(
 
 @app.post("/send_message")
 async def send_message(request: Request, body: SendMessageBody):
+    idempotency_key, cached = _check_send_idempotency(request)
+    if cached is not _MISSING:
+        return cached
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -937,6 +1052,8 @@ async def send_message(request: Request, body: SendMessageBody):
             message_effect_id=body.message_effect_id,
             policy_overrides=overrides,
         )
+        if idempotency_key:
+            _idempotency_cache.put(idempotency_key, result)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -950,6 +1067,10 @@ async def send_message(request: Request, body: SendMessageBody):
 @app.post("/send_file")
 async def send_file(request: Request, body: SendFileBody):
     _ensure_extended_api_enabled()
+    idempotency_key, cached = _check_send_idempotency(request)
+    if cached is not _MISSING:
+        return cached
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -966,6 +1087,8 @@ async def send_file(request: Request, body: SendFileBody):
             message_effect_id=body.message_effect_id,
             policy_overrides=overrides,
         )
+        if idempotency_key:
+            _idempotency_cache.put(idempotency_key, result)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -979,15 +1102,22 @@ async def send_file(request: Request, body: SendFileBody):
 @app.post("/send_voice")
 async def send_voice(request: Request, body: SendVoiceBody):
     _ensure_extended_api_enabled()
+    idempotency_key, cached = _check_send_idempotency(request)
+    if cached is not _MISSING:
+        return cached
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
-        return await bridge.send_voice(
+        result = await bridge.send_voice(
             body.peer,
             body.file_path,
             caption=body.caption,
             policy_overrides=overrides,
         )
+        if idempotency_key:
+            _idempotency_cache.put(idempotency_key, result)
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BridgeError as exc:
@@ -1019,14 +1149,21 @@ async def transcribe_voice(request: Request, body: TranscribeVoiceBody):
 @app.post("/send_sticker")
 async def send_sticker(request: Request, body: SendStickerBody):
     _ensure_extended_api_enabled()
+    idempotency_key, cached = _check_send_idempotency(request)
+    if cached is not _MISSING:
+        return cached
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
-        return await bridge.send_sticker(
+        result = await bridge.send_sticker(
             body.peer,
             body.file_path,
             policy_overrides=overrides,
         )
+        if idempotency_key:
+            _idempotency_cache.put(idempotency_key, result)
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BridgeError as exc:
@@ -1039,6 +1176,10 @@ async def send_sticker(request: Request, body: SendStickerBody):
 @app.post("/send_location")
 async def send_location(request: Request, body: SendLocationBody):
     _ensure_extended_api_enabled()
+    idempotency_key, cached = _check_send_idempotency(request)
+    if cached is not _MISSING:
+        return cached
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1048,6 +1189,8 @@ async def send_location(request: Request, body: SendLocationBody):
             longitude=body.longitude,
             policy_overrides=overrides,
         )
+        if idempotency_key:
+            _idempotency_cache.put(idempotency_key, result)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2147,9 +2290,15 @@ async def _server_qr_flow(ctx: Any) -> None:
             media_download_root=cfg.get("dm_media_path"),
         )
         client.add_event_handler(_on_new_dm, telethon_events.NewMessage(incoming=True))
+        # ponytail: disconnect the pre-reauth bridge before swapping it out, else its Telethon
+        # client keeps a live TCP connection and its _on_new_dm handler keeps firing alongside
+        # the new one (duplicate inbound DM processing). disconnect() no-ops if already down.
+        old_bridge = _bridge
         _bridge = new_bridge
         _needs_reauth = False
         client_handed_off = True
+        if old_bridge is not None:
+            await old_bridge.disconnect()
         await new_bridge.refresh_premium()
         logger.info("QR re-auth successful; bridge is now connected.")
     except Exception as exc:

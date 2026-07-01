@@ -99,7 +99,7 @@ def load_config() -> dict[str, Any]:
     write_deny_chat_ids = _list_from_env("TELEGRAM_WRITE_DENY_CHAT_IDS")
     api_token = os.environ.get("TELEGRAM_BRIDGE_API_TOKEN", "").strip()
     rpc_timeout_sec = _get_float("TELEGRAM_RPC_TIMEOUT_SEC") or 30.0
-    flood_wait_max_sleep_sec = _get_float("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC") or 3.0
+    flood_wait_max_sleep_sec = _get_float("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC") or 30.0
     policy_path = os.environ.get("TELEGRAM_POLICY_PATH", "").strip()
     policy_default_profile = os.environ.get("TELEGRAM_POLICY_DEFAULT_PROFILE", "").strip()
     default_state_dir = (
@@ -316,16 +316,26 @@ def resolve_effective_policy(
             merged[key] = request_overrides[key]
 
     if "read_allow_from" in request_overrides:
-        allow_ids = merged.get("read_allow_chat_ids") or []
-        merged["read_allow_chat_ids"] = list(set(allow_ids) | set(request_overrides["read_allow_from"]))
+        base_allow = merged.get("read_allow_chat_ids")
+        header_allow = set(request_overrides["read_allow_from"])
+        merged["read_allow_chat_ids"] = (
+            list(header_allow)
+            if base_allow is None or "*" in base_allow
+            else list(set(base_allow) & header_allow)
+        )
 
     if "read_deny_from" in request_overrides:
         deny_ids = merged.get("read_deny_chat_ids") or []
         merged["read_deny_chat_ids"] = list(set(deny_ids) | set(request_overrides["read_deny_from"]))
 
     if "write_allow_to" in request_overrides:
-        allow_ids = merged.get("write_allow_chat_ids") or []
-        merged["write_allow_chat_ids"] = list(set(allow_ids) | set(request_overrides["write_allow_to"]))
+        base_allow = merged.get("write_allow_chat_ids")
+        header_allow = set(request_overrides["write_allow_to"])
+        merged["write_allow_chat_ids"] = (
+            list(header_allow)
+            if base_allow is None or "*" in base_allow
+            else list(set(base_allow) & header_allow)
+        )
 
     if "write_deny_to" in request_overrides:
         deny_ids = merged.get("write_deny_chat_ids") or []
