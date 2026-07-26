@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 from urllib.parse import urlparse
 
+from hermes_tg_bridge.config import normalize_peer_key
 from hermes_tg_bridge.state import dialog_to_inventory_entry
 
 logger = logging.getLogger(__name__)
@@ -97,23 +98,9 @@ class BridgePolicy:
     reply_delay_max_sec: float | None
 
 
-def _normalize_peer(peer: str | int) -> str:
-    """Normalize peer for allow/deny check: username (no @, lowercase) or canonical id."""
-    value = str(peer).strip()
-    if not value:
-        return ""
-    if value == "*":
-        return "*"
-    if value.lower() == "me":
-        return "me"
-    if value.startswith("@"):
-        value = value[1:]
-    if value.lstrip("-").isdigit():
-        try:
-            return str(int(value))
-        except ValueError:
-            return value
-    return value.lower()
+# Single definition, shared with the policy layer so header narrowing and scope
+# checks cannot disagree about what "the same peer" means.
+_normalize_peer = normalize_peer_key
 
 
 def _normalize_peer_list(peers: Iterable[str] | None) -> frozenset[str]:
@@ -336,6 +323,8 @@ def _is_video_note(message: Any) -> bool:
 def _extract_media_summary(message: Any, *, premium: bool | None = None) -> dict[str, Any]:
     media = getattr(message, "media", None)
     file = getattr(message, "file", None)
+    is_voice = _is_voice_note(message)
+    is_video_note = _is_video_note(message)
     summary: dict[str, Any] = {
         "has_media": bool(media),
         "media_type": type(media).__name__ if media is not None else None,
@@ -343,7 +332,12 @@ def _extract_media_summary(message: Any, *, premium: bool | None = None) -> dict
         "file_size": getattr(file, "size", None),
         "file_name": getattr(file, "name", None),
     }
-    if premium is not None and (_is_voice_note(message) or _is_video_note(message)):
+    if media is not None:
+        # Voice notes and video circles are plain documents on the wire; without
+        # these flags a consumer cannot tell them from any other audio/video file.
+        summary["is_voice_note"] = is_voice
+        summary["is_video_note"] = is_video_note
+    if premium is not None and (is_voice or is_video_note):
         summary["can_transcribe"] = bool(premium)
     return summary
 
@@ -2960,6 +2954,50 @@ class BridgeClient:
             "peer": _normalize_peer(peer),
             "id": _normalize_peer(getattr(entity, "id", None)) or None,
             "username": _normalize_peer(getattr(entity, "username", None)) or None,
+        }
+
+    async def get_dm_read_state(
+        self,
+        peer: str | int,
+        *,
+        policy_overrides: dict[str, object] | None = None,
+    ) -> dict[str, int]:
+        """Report where Telegram itself thinks this conversation has been read up to.
+
+        ``read_inbox_max_id`` is the newest inbound message the account has already
+        read; anything above it is genuinely unread. Used to give a first-time
+        inbox cursor a sensible baseline instead of replaying old conversation.
+        """
+        policy = self._resolve_policy(policy_overrides)
+        entity, _ = await self._resolve_scoped_entity(
+            peer,
+            action="reading",
+            scope=policy.read_scope,
+        )
+        functions = _telethon_functions()
+        types = _telethon_types()
+        input_peer = await self._call_telegram(
+            self._client.get_input_entity,
+            entity,
+            action="resolve dialog peer",
+        )
+        result = await self._call_telegram(
+            self._client.__call__,
+            functions.messages.GetPeerDialogsRequest(
+                peers=[types.InputDialogPeer(peer=input_peer)]
+            ),
+            action="read dialog state",
+        )
+        dialogs = getattr(result, "dialogs", None) or []
+        dialog = dialogs[0] if dialogs else None
+
+        def _as_int(value: Any) -> int:
+            return value if isinstance(value, int) and value > 0 else 0
+
+        return {
+            "read_inbox_max_id": _as_int(getattr(dialog, "read_inbox_max_id", None)),
+            "top_message_id": _as_int(getattr(dialog, "top_message", None)),
+            "unread_count": _as_int(getattr(dialog, "unread_count", None)),
         }
 
     async def get_incoming_direct_messages(

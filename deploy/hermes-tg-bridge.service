@@ -12,13 +12,20 @@ Environment=PYTHONUNBUFFERED=1
 # Load secret token from file (must be mode 0600 with TELEGRAM_BRIDGE_API_TOKEN=...)
 EnvironmentFile=-/etc/hermes-tg-bridge/secret.env
 Environment=TELEGRAM_POLICY_PATH=/etc/hermes-tg-bridge/policy.json
-Environment=TELEGRAM_BRIDGE_CONFIG_PATH=/etc/hermes-tg-bridge/config.yaml
 # Optional tuning (defaults shown; uncomment to override):
 # Environment=TELEGRAM_MAX_SENDS_PER_MIN=25
 # Environment=TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC=30
 # Environment=TELEGRAM_IDEMPOTENCY_TTL_SEC=600
 # Environment=TELEGRAM_IDEMPOTENCY_MAX_KEYS=1000
 # Environment=HERMES_QR_PASSWORD_TIMEOUT=180
+# Environment=TELEGRAM_REPLY_DELAY_SEC=2
+# What to do with messages that predate the first start:
+#   unread (default) = answer whatever is still unread, none = only new arrivals,
+#   all = replay recent history
+# Environment=TELEGRAM_DM_INBOX_BACKFILL=unread
+# Days to keep downloaded inbound media before it is swept (0 disables the sweep)
+# Environment=TELEGRAM_DM_MEDIA_RETENTION_DAYS=7
+# Leave only the endpoints the Hermes gateway needs; everything else returns 404
 # Environment=TELEGRAM_DISABLE_EXTENDED_API=1
 ExecStart=/opt/hermes-tg-bridge/backend/.venv/bin/hermes-tg-bridge run
 Restart=on-failure

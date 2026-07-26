@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from hermes_tg_bridge.client import (
+    MAX_MESSAGE_LENGTH,
     BridgeClient,
     BridgeError,
     BridgeValidationError,
@@ -51,15 +53,31 @@ _needs_reauth: bool = False
 _qr_auth_ctx: "Any | None" = None  # QrAuthContext, typed as Any to avoid circular import
 _qr_auth_task: "asyncio.Task | None" = None
 
+def _env_number(key: str, default: float) -> float:
+    """Read a numeric tuning env var without letting a typo kill process startup."""
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
 # Extended API control
 _EXTENDED_API_DISABLED = os.getenv("TELEGRAM_DISABLE_EXTENDED_API", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # Idempotency cache for send_* endpoints (Idempotency-Key header)
-_IDEMPOTENCY_TTL_SEC = float(os.getenv("TELEGRAM_IDEMPOTENCY_TTL_SEC", "600"))
-_IDEMPOTENCY_MAX_KEYS = int(os.getenv("TELEGRAM_IDEMPOTENCY_MAX_KEYS", "1000"))
+_IDEMPOTENCY_TTL_SEC = _env_number("TELEGRAM_IDEMPOTENCY_TTL_SEC", 600.0)
+_IDEMPOTENCY_MAX_KEYS = int(_env_number("TELEGRAM_IDEMPOTENCY_MAX_KEYS", 1000))
 
 # App-level outgoing rate limit (independent of Telegram's own FloodWait)
-_MAX_SENDS_PER_MIN = int(os.getenv("TELEGRAM_MAX_SENDS_PER_MIN", "25"))
+_MAX_SENDS_PER_MIN = int(_env_number("TELEGRAM_MAX_SENDS_PER_MIN", 25))
+
+# How often the inbound-media directory is swept for expired downloads.
+MEDIA_PRUNE_INTERVAL_SEC = 3600.0
+_last_media_prune_at: float = 0.0
 
 NON_DOWNLOADABLE_DM_MEDIA_TYPES = frozenset(
     {
@@ -166,6 +184,10 @@ class DmInboxBroker:
     def __init__(self, max_events: int = 500) -> None:
         self._events: deque[InboundDmEvent] = deque(maxlen=max_events)
         self._condition = asyncio.Condition()
+        # Set when the ring buffer drops an event that was never handed out, so a
+        # poller knows its in-memory view is incomplete and must fall back to
+        # reading history from Telegram instead of trusting an empty result.
+        self._dropped_unseen = False
 
     async def push(self, payload: dict[str, Any]) -> None:
         sender_id = payload.get("sender_id")
@@ -174,8 +196,16 @@ class DmInboxBroker:
         if not sender_key or not isinstance(message_id, int):
             return
         async with self._condition:
+            if self._events.maxlen is not None and len(self._events) >= self._events.maxlen:
+                self._dropped_unseen = True
             self._events.append(InboundDmEvent(sender_key=sender_key, message_id=message_id, payload=payload))
             self._condition.notify_all()
+
+    def take_dropped_flag(self) -> bool:
+        """Read and clear the "buffer overflowed" marker."""
+        dropped = self._dropped_unseen
+        self._dropped_unseen = False
+        return dropped
 
     async def wait_for_new_events(self, timeout_sec: float) -> None:
         timeout_sec = max(0.0, timeout_sec)
@@ -282,17 +312,23 @@ class SendRateLimiter:
         self._window_sec = 60.0
         self._timestamps: deque[float] = deque()
 
-    def check(self) -> float | None:
-        """Return None if a send is allowed (and record it), else seconds to wait."""
+    def check(self, cost: int = 1) -> float | None:
+        """Return None if a send is allowed (and record it), else seconds to wait.
+
+        ``cost`` is how many Telegram messages the request will actually produce —
+        an oversized reply is split into several, and charging it as one would let
+        a runaway agent send far past the configured cap.
+        """
         if self._max_per_min <= 0:
             return None
+        cost = max(1, cost)
         now = time.monotonic()
         while self._timestamps and now - self._timestamps[0] >= self._window_sec:
             self._timestamps.popleft()
-        if len(self._timestamps) >= self._max_per_min:
-            retry_after = self._window_sec - (now - self._timestamps[0])
-            return max(1.0, retry_after)
-        self._timestamps.append(now)
+        if len(self._timestamps) + cost > self._max_per_min:
+            oldest = self._timestamps[0] if self._timestamps else now
+            return max(1.0, self._window_sec - (now - oldest))
+        self._timestamps.extend([now] * cost)
         return None
 
 
@@ -480,10 +516,34 @@ def _check_auth(request: Request, api_token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+# Endpoints the Hermes gateway itself needs. Everything else counts as extended
+# API and disappears under TELEGRAM_DISABLE_EXTENDED_API=1. Listing the core
+# rather than the extras means a newly added endpoint is closed by default
+# instead of quietly staying reachable.
+CORE_API_PATHS = frozenset(
+    {
+        "/health",
+        "/me",
+        "/send_message",
+        "/dm/inbox/poll",
+        "/dm/inbox/ack",
+        "/dm/read",
+        "/dm/typing",
+        "/auth/qr",
+        "/auth/qr/start",
+        "/auth/qr/status",
+        "/auth/qr/2fa",
+    }
+)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.url.path == "/health":
+    path = request.url.path
+    if path == "/health":
         return await call_next(request)
+    # Authenticate first: an unauthenticated caller must not be able to tell an
+    # existing-but-disabled endpoint from a missing one by the status code.
     cfg = get_config()
     token = cfg.get("api_token")
     if token:
@@ -491,12 +551,9 @@ async def auth_middleware(request: Request, call_next):
             _check_auth(request, token)
         except HTTPException as e:
             return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+    if _EXTENDED_API_DISABLED and path not in CORE_API_PATHS:
+        return JSONResponse(status_code=404, content={"detail": "Extended API disabled"})
     return await call_next(request)
-
-
-def _ensure_extended_api_enabled() -> None:
-    if _EXTENDED_API_DISABLED:
-        raise HTTPException(status_code=404, detail="Extended API disabled")
 
 
 _MISSING = object()
@@ -513,14 +570,21 @@ def _check_send_idempotency(request: Request) -> tuple[str | None, Any]:
     return key, _MISSING
 
 
-def _check_send_rate_limit() -> None:
+def _text_send_cost(text: str) -> int:
+    """How many Telegram messages a body of text will be split into."""
+    return max(1, math.ceil(len(text or "") / MAX_MESSAGE_LENGTH))
+
+
+def _check_send_rate_limit(cost: int = 1) -> None:
     """Raise 429 (without touching Telegram) if the app-level outgoing send limit is exceeded.
 
     # ponytail: this is a blunt safety cap against a runaway agent, not traffic shaping.
     # Telegram's own FloodWait handling in client.py remains the source of truth for what
     # Telegram will actually tolerate; this just fails fast before we even try.
+    # Deliberately not applied to typing/read receipts: those are one-per-turn control
+    # signals from the gateway, and capping them would break ordinary replies.
     """
-    retry_after = _send_rate_limiter.check()
+    retry_after = _send_rate_limiter.check(cost)
     if retry_after is not None:
         raise HTTPException(
             status_code=429,
@@ -839,6 +903,81 @@ async def _resolve_allowed_dm_senders(bridge: BridgeClient, policy: dict) -> lis
     return senders
 
 
+async def _seed_dm_cursors(
+    *,
+    bridge: BridgeClient,
+    policy: dict,
+    allowed_senders: list[AllowedDmSender],
+    consumer_id: str,
+    cursor_store: DmCursorStore,
+) -> bool:
+    """Give never-before-served conversations a starting position.
+
+    Without a baseline the cursor starts at 0 and the first poll replays the tail
+    of every allowed conversation as if it had just arrived — dispatching old
+    messages to the agent and (with read receipts on) marking them read. The
+    default baseline is Telegram's own read pointer, so the agent picks up exactly
+    what is genuinely unread. Returns True when any cursor was written.
+    """
+    mode = str(get_config().get("dm_inbox_backfill", "unread"))
+    if mode == "all":
+        return False
+
+    seeded = False
+    for sender in allowed_senders:
+        if cursor_store.has_cursor(consumer_id, sender.cursor_key):
+            continue
+        try:
+            state = await bridge.get_dm_read_state(sender.peer_ref, policy_overrides=policy)
+        except BridgeError as exc:
+            logger.warning(
+                "Could not read dialog state for %s; leaving cursor unseeded: %s",
+                sender.peer_ref, exc.detail,
+            )
+            continue
+        except Exception:
+            logger.exception("Dialog state lookup failed for %s", sender.peer_ref)
+            continue
+        baseline = state["top_message_id"] if mode == "none" else state["read_inbox_max_id"]
+        cursor_store.ensure_cursor(consumer_id, sender.cursor_key, baseline)
+        seeded = True
+        logger.info(
+            "Seeded DM cursor for %s at message %s (backfill=%s)",
+            sender.cursor_key, baseline, mode,
+        )
+    return seeded
+
+
+def _prune_dm_media(media_root: Path, retention_days: float) -> None:
+    """Delete downloaded attachments older than the retention window.
+
+    The bridge downloads inbound media so the agent can look at it; nothing else
+    ever removes those files, so without this the state directory grows forever.
+    """
+    if retention_days <= 0:
+        return
+    cutoff = time.time() - retention_days * 86400.0
+    removed = 0
+    for path in media_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    for directory in sorted(media_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if directory.is_dir():
+            try:
+                directory.rmdir()  # only succeeds when empty
+            except OSError:
+                pass
+    if removed:
+        logger.info("Pruned %d inbound media file(s) older than %s day(s)", removed, retention_days)
+
+
 async def _recover_dm_events(
     *,
     bridge: BridgeClient,
@@ -878,6 +1017,25 @@ async def _recover_dm_events(
                 return recovered
     recovered.sort(key=lambda item: (int(item.get("date_unix", 0)), int(item.get("id", 0))))
     return recovered
+
+
+def _merge_dm_events(
+    primary: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Combine buffered and recovered events, dropping duplicates, oldest first."""
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for event in list(primary) + list(extra):
+        key = (_normalize_peer(event.get("sender_id")), int(event.get("id") or 0))
+        if not key[0] or key[1] <= 0 or key in seen:
+            continue
+        seen.add(key)
+        merged.append(event)
+    merged.sort(key=lambda item: (int(item.get("date_unix", 0)), int(item.get("id", 0))))
+    return merged[:limit]
 
 
 def _dm_event_has_downloadable_media(event: dict[str, Any]) -> bool:
@@ -978,12 +1136,21 @@ async def _enrich_dm_events_with_downloaded_media(
     allowed_senders: list[AllowedDmSender],
     events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    global _last_media_prune_at
+
     cfg = get_config()
     if not bool(cfg.get("dm_auto_download_media", True)):
         return events
 
     media_root = Path(str(cfg.get("dm_media_path") or "")).expanduser().resolve()
     media_root.mkdir(parents=True, exist_ok=True)
+
+    now = time.monotonic()
+    if now - _last_media_prune_at >= MEDIA_PRUNE_INTERVAL_SEC:
+        _last_media_prune_at = now
+        await asyncio.to_thread(
+            _prune_dm_media, media_root, float(cfg.get("dm_media_retention_days", 7.0))
+        )
 
     for event in events:
         if not _dm_event_has_downloadable_media(event):
@@ -1037,7 +1204,7 @@ async def send_message(request: Request, body: SendMessageBody):
     idempotency_key, cached = _check_send_idempotency(request)
     if cached is not _MISSING:
         return cached
-    _check_send_rate_limit()
+    _check_send_rate_limit(_text_send_cost(body.text))
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1066,7 +1233,6 @@ async def send_message(request: Request, body: SendMessageBody):
 
 @app.post("/send_file")
 async def send_file(request: Request, body: SendFileBody):
-    _ensure_extended_api_enabled()
     idempotency_key, cached = _check_send_idempotency(request)
     if cached is not _MISSING:
         return cached
@@ -1101,7 +1267,6 @@ async def send_file(request: Request, body: SendFileBody):
 
 @app.post("/send_voice")
 async def send_voice(request: Request, body: SendVoiceBody):
-    _ensure_extended_api_enabled()
     idempotency_key, cached = _check_send_idempotency(request)
     if cached is not _MISSING:
         return cached
@@ -1148,7 +1313,6 @@ async def transcribe_voice(request: Request, body: TranscribeVoiceBody):
 
 @app.post("/send_sticker")
 async def send_sticker(request: Request, body: SendStickerBody):
-    _ensure_extended_api_enabled()
     idempotency_key, cached = _check_send_idempotency(request)
     if cached is not _MISSING:
         return cached
@@ -1175,7 +1339,6 @@ async def send_sticker(request: Request, body: SendStickerBody):
 
 @app.post("/send_location")
 async def send_location(request: Request, body: SendLocationBody):
-    _ensure_extended_api_enabled()
     idempotency_key, cached = _check_send_idempotency(request)
     if cached is not _MISSING:
         return cached
@@ -1203,7 +1366,7 @@ async def send_location(request: Request, body: SendLocationBody):
 
 @app.post("/edit_message")
 async def edit_message(request: Request, body: EditMessageBody):
-    _ensure_extended_api_enabled()
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1225,7 +1388,6 @@ async def edit_message(request: Request, body: EditMessageBody):
 
 @app.post("/delete_message")
 async def delete_message(request: Request, body: DeleteMessageBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1247,7 +1409,7 @@ async def delete_message(request: Request, body: DeleteMessageBody):
 
 @app.post("/forward_message")
 async def forward_message(request: Request, body: ForwardMessageBody):
-    _ensure_extended_api_enabled()
+    _check_send_rate_limit()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1476,7 +1638,6 @@ async def download_media(request: Request, peer: str | int, message_id: int, out
 
 @app.get("/contacts")
 async def contacts(request: Request):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1492,7 +1653,6 @@ async def contacts(request: Request):
 
 @app.post("/search_contacts")
 async def search_contacts(request: Request, body: SearchContactsBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1508,7 +1668,6 @@ async def search_contacts(request: Request, body: SearchContactsBody):
 
 @app.post("/contacts/add")
 async def add_contact(request: Request, body: ContactBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1529,7 +1688,6 @@ async def add_contact(request: Request, body: ContactBody):
 
 @app.post("/contacts/delete")
 async def delete_contact(request: Request, body: ContactPeerBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1560,7 +1718,6 @@ async def blocked_users(request: Request, limit: int = 100):
 
 @app.post("/block_user")
 async def block_user(request: Request, body: ContactPeerBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1576,7 +1733,6 @@ async def block_user(request: Request, body: ContactPeerBody):
 
 @app.post("/unblock_user")
 async def unblock_user(request: Request, body: ContactPeerBody):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -1592,7 +1748,6 @@ async def unblock_user(request: Request, body: ContactPeerBody):
 
 @app.get("/resolve_username")
 async def resolve_username(request: Request, username: str):
-    _ensure_extended_api_enabled()
     bridge = get_bridge()
     try:
         overrides = await resolve_request_policy(request)
@@ -2032,29 +2187,41 @@ async def poll_dm_inbox(request: Request, timeout_ms: int = 25000, limit: int = 
         allowed_senders = await _resolve_allowed_dm_senders(bridge, policy)
         consumer_id = _resolve_dm_consumer_id(policy)
         cursor_store = get_dm_cursor_store()
+        await _seed_dm_cursors(
+            bridge=bridge,
+            policy=policy,
+            allowed_senders=allowed_senders,
+            consumer_id=consumer_id,
+            cursor_store=cursor_store,
+        )
         cursor_map = cursor_store.get_consumer_cursors(consumer_id)
         broker = get_dm_broker()
+        capped_limit = min(max(1, limit), 50)
 
+        # An overflowed ring buffer means "there may be events we never handed
+        # out", so history recovery has to run even if the buffer is not empty.
+        overflowed = broker.take_dropped_flag()
         events = broker.list_pending(
             allowed_senders=allowed_senders,
             cursor_map=cursor_map,
-            limit=min(max(1, limit), 50),
+            limit=capped_limit,
         )
-        if not events:
-            events = await _recover_dm_events(
+        if not events or overflowed:
+            recovered = await _recover_dm_events(
                 bridge=bridge,
                 policy=policy,
                 allowed_senders=allowed_senders,
                 cursor_map=cursor_map,
-                limit=min(max(1, limit), 50),
+                limit=capped_limit,
             )
+            events = _merge_dm_events(events, recovered, limit=capped_limit)
         if not events:
             await broker.wait_for_new_events(timeout_ms / 1000.0)
             cursor_map = cursor_store.get_consumer_cursors(consumer_id)
             events = broker.list_pending(
                 allowed_senders=allowed_senders,
                 cursor_map=cursor_map,
-                limit=min(max(1, limit), 50),
+                limit=capped_limit,
             )
         if events:
             events = await _enrich_dm_events_with_downloaded_media(
@@ -2158,7 +2325,6 @@ async def send_dm_typing(request: Request, body: DmPeerBody):
 
 @app.get("/sources")
 async def list_sources(request: Request, refresh: bool = False):
-    _ensure_extended_api_enabled()
     try:
         policy = await resolve_request_policy(request)
         data = await _sync_sources_inventory(force=refresh)
@@ -2181,7 +2347,6 @@ async def list_sources(request: Request, refresh: bool = False):
 
 @app.post("/sources/sync")
 async def sync_sources(request: Request, body: SyncSourcesBody):
-    _ensure_extended_api_enabled()
     try:
         policy = await resolve_request_policy(request)
         data = await _sync_sources_inventory(force=True, limit=body.limit)

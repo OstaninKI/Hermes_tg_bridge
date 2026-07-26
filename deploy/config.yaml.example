@@ -1,7 +1,6 @@
-bridge:
-  url: "http://127.0.0.1:8765"
-  api_token: "replace-with-the-same-token-as-the-backend"
-  policy_profile: "dm_inbox"
+# Hermes config.yaml fragment. This is the *Hermes* config, not the backend's —
+# the backend is configured entirely through environment variables (see
+# deploy/hermes-tg-bridge.service) and its policy.json.
 
 plugins:
   enabled:
@@ -13,8 +12,12 @@ gateway:
       enabled: true
       extra:
         bridge_url: "http://127.0.0.1:8765"
+        # Same token as TELEGRAM_BRIDGE_API_TOKEN on the backend.
+        # Prefer HERMES_TG_BRIDGE_API_TOKEN in the environment over a token here.
+        api_token: "replace-with-the-same-token-as-the-backend"
         policy_profile: "dm_inbox"
-        # Replace with your Telegram user IDs (e.g., ["123456789"])
+        # Replace with your Telegram user IDs (e.g., ["123456789"]).
+        # These only narrow the backend policy; they cannot widen it.
         allow_from: ["<your-telegram-user-id>"]
         write_to: ["<your-telegram-user-id>"]
         mark_read_on_inbound: true

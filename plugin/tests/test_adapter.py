@@ -1,11 +1,12 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from adapter import (
+    MAX_EVENT_ATTEMPTS,
     AdapterConfig,
     BasePlatformAdapter,
     BridgeClient,
@@ -17,6 +18,19 @@ from adapter import (
     build_policy_headers,
     register,
 )
+
+
+class RecordingBridge:
+    """Minimal bridge double that records the DM state calls it receives."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    async def ack(self, event):
+        self.calls.append(("ack", event["id"]))
+
+    async def mark_read(self, event):
+        self.calls.append(("read", event["id"]))
 
 
 def _make_bridge_client(handler, config: AdapterConfig | None = None):
@@ -260,16 +274,6 @@ def test_event_to_message_uses_media_marker_when_text_empty():
 
 
 def test_handle_inbound_event_dispatches_then_acks_and_reads():
-    class RecordingBridge:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
-
-        async def ack(self, event):
-            self.calls.append(("ack", event["id"]))
-
-        async def mark_read(self, event):
-            self.calls.append(("read", event["id"]))
-
     adapter = TelegramUserAdapter(
         AdapterConfig(allow_from=["123"], write_to=["123"]),
         bridge=RecordingBridge(),
@@ -312,7 +316,9 @@ def test_send_returns_success_result():
     assert result.success is True
     assert result.message_id == "77"
     assert result.error is None
-    bridge.send_message.assert_awaited_once_with("123", "hello", 11)
+    call = bridge.send_message.await_args
+    assert call.args == ("123", "hello", 11)
+    assert call.kwargs["idempotency_key"]
 
 
 def test_send_returns_failure_result():
@@ -331,6 +337,66 @@ def test_send_returns_failure_result():
     assert result.success is False
     assert result.message_id is None
     assert result.error == "boom"
+    assert result.retryable is False
+
+
+def test_send_reuses_idempotency_key_across_retries_of_the_same_message():
+    """A retry after a client-side timeout must not deliver the message twice."""
+    keys: list[str] = []
+
+    async def capture(peer, text, reply_to=None, idempotency_key=None):
+        keys.append(idempotency_key)
+        return {"message_id": 1}
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=SimpleNamespace(send_message=capture),
+    )
+
+    async def scenario():
+        await adapter.send("123", "same text")
+        await adapter.send("123", "same text")
+        await adapter.send("123", "different text")
+
+    asyncio.run(scenario())
+
+    assert keys[0] == keys[1]
+    assert keys[2] != keys[0]
+
+
+def test_send_marks_429_retryable_with_retry_after():
+    request = httpx.Request("POST", "http://bridge.test/send_message")
+    response = httpx.Response(429, request=request, headers={"Retry-After": "7"})
+
+    async def rate_limited(*args, **kwargs):
+        raise httpx.HTTPStatusError("Too Many Requests", request=request, response=response)
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=SimpleNamespace(send_message=rate_limited),
+    )
+
+    result = asyncio.run(adapter.send("123", "hello"))
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.retry_after == 7
+    assert result.error_kind == "rate_limited"
+
+
+def test_send_marks_timeout_retryable():
+    async def timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("timed out")
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=SimpleNamespace(send_message=timeout),
+    )
+
+    result = asyncio.run(adapter.send("123", "hello"))
+
+    assert result.success is False
+    assert result.retryable is True
 
 
 def test_adapter_extends_hermes_base_adapter():
@@ -436,17 +502,8 @@ def test_poll_loop_429_invalid_retry_after_falls_back():
     assert any(call == bounded_delay for call in sleep_calls), f"Expected {bounded_delay}s sleep, got {sleep_calls}"
 
 
-def test_allow_from_filters_unknown_sender():
-    class RecordingBridge:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
-
-        async def ack(self, event):
-            self.calls.append(("ack", event["id"]))
-
-        async def mark_read(self, event):
-            self.calls.append(("read", event["id"]))
-
+def test_allow_from_filters_unknown_sender_but_still_acks():
+    """A filtered event must be acked, or the backend re-serves it on every poll."""
     adapter = TelegramUserAdapter(
         AdapterConfig(
             allow_from=["999"],
@@ -475,20 +532,32 @@ def test_allow_from_filters_unknown_sender():
     )
 
     assert len(seen_messages) == 0
-    assert len(adapter.bridge.calls) == 0
+    assert adapter.bridge.calls == [("ack", 1)]
+
+
+def test_allow_from_matches_username_regardless_of_at_and_case():
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["@Alice"], write_to=["@Alice"]),
+        bridge=RecordingBridge(),
+    )
+    seen_messages: list[MessageEvent] = []
+
+    async def handle_message(message):
+        seen_messages.append(message)
+
+    adapter._message_handler = handle_message
+
+    asyncio.run(
+        adapter._handle_inbound_event(
+            {"id": 5, "sender_id": "111", "sender_username": "alice", "text": "hi"}
+        )
+    )
+
+    assert len(seen_messages) == 1
+    assert ("ack", 5) in adapter.bridge.calls
 
 
 def test_allow_all_users_bypasses_filter():
-    class RecordingBridge:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
-
-        async def ack(self, event):
-            self.calls.append(("ack", event["id"]))
-
-        async def mark_read(self, event):
-            self.calls.append(("read", event["id"]))
-
     adapter = TelegramUserAdapter(
         AdapterConfig(
             allow_from=["999"],
@@ -518,3 +587,215 @@ def test_allow_all_users_bypasses_filter():
 
     assert len(seen_messages) == 1
     assert len(adapter.bridge.calls) == 2
+
+
+def test_plugin_loads_the_way_hermes_loads_it():
+    """__init__.py must reach adapter.py from the hermes_plugins.<slug> package."""
+    from conftest import MODULE_NAME, load_plugin_package
+
+    package = load_plugin_package()
+
+    assert package.__name__ == MODULE_NAME
+    assert callable(package.register)
+
+
+def test_connect_accepts_is_reconnect_keyword():
+    """The gateway's reconnect watcher calls connect(is_reconnect=True)."""
+    bridge = SimpleNamespace(health=AsyncMock(return_value={"status": "ok"}))
+    adapter = TelegramUserAdapter(AdapterConfig(api_token="token"), bridge=bridge)
+
+    async def scenario():
+        connected = await adapter.connect(is_reconnect=True)
+        await adapter.disconnect()
+        return connected
+
+    assert asyncio.run(scenario()) is True
+    bridge.health.assert_awaited_once()
+
+
+def test_connect_reports_fatal_error_when_bridge_is_down():
+    async def unreachable():
+        raise httpx.ConnectError("connection refused")
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(api_token="token"),
+        bridge=SimpleNamespace(health=unreachable),
+    )
+
+    assert asyncio.run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "bridge_unavailable"
+    assert adapter.is_connected is False
+
+
+def test_failing_event_is_retried_then_dropped_to_unblock_the_inbox():
+    bridge = RecordingBridge()
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=bridge,
+    )
+
+    async def always_fails(_message):
+        raise RuntimeError("agent exploded")
+
+    adapter._message_handler = always_fails
+    event = {"id": 42, "sender_id": "123", "text": "poison"}
+
+    async def scenario():
+        for _ in range(MAX_EVENT_ATTEMPTS):
+            await adapter._handle_inbound_event(event)
+
+    asyncio.run(scenario())
+
+    # Nine silent retries, then a single forced ack so the queue moves on.
+    assert bridge.calls == [("ack", 42)]
+    assert adapter._failed_events == {}
+
+
+def test_successful_event_clears_previous_failures():
+    bridge = RecordingBridge()
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=bridge,
+    )
+    fail = True
+
+    async def flaky(_message):
+        if fail:
+            raise RuntimeError("transient")
+
+    adapter._message_handler = flaky
+    event = {"id": 43, "sender_id": "123", "text": "hi"}
+
+    async def scenario():
+        nonlocal fail
+        await adapter._handle_inbound_event(event)
+        fail = False
+        await adapter._handle_inbound_event(event)
+
+    asyncio.run(scenario())
+
+    assert adapter._failed_events == {}
+    assert bridge.calls == [("ack", 43), ("read", 43)]
+
+
+def test_media_paths_are_attached_to_the_message(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"\xff\xd8\xff\xdbfake-jpeg")
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=RecordingBridge(),
+    )
+    event = {
+        "id": 44,
+        "sender_id": "123",
+        "text": "",
+        "has_media": True,
+        "media_type": "MessageMediaPhoto",
+        "mime_type": "image/jpeg",
+        "file_name": "photo.jpg",
+        "media_paths": [str(photo)],
+    }
+
+    message = adapter.event_to_message(event)
+    asyncio.run(adapter._attach_media(event, message))
+
+    assert message.message_type == MessageType.PHOTO
+    assert message.media_urls == [str(photo)]
+    assert message.media_types == ["image/jpeg"]
+
+
+def test_missing_media_file_does_not_break_dispatch(tmp_path):
+    adapter = TelegramUserAdapter(
+        AdapterConfig(allow_from=["123"], write_to=["123"]),
+        bridge=RecordingBridge(),
+    )
+    event = {
+        "id": 45,
+        "sender_id": "123",
+        "text": "look",
+        "has_media": True,
+        "media_paths": [str(tmp_path / "gone.bin")],
+    }
+
+    message = adapter.event_to_message(event)
+    asyncio.run(adapter._attach_media(event, message))
+
+    assert message.media_urls == []
+    assert message.text == "look"
+
+
+def test_message_type_mapping():
+    adapter = TelegramUserAdapter(AdapterConfig(), bridge=RecordingBridge())
+    cases = [
+        ({"id": 1, "sender_id": "1"}, MessageType.TEXT),
+        ({"id": 1, "sender_id": "1", "has_media": True, "media_type": "MessageMediaGeo"}, MessageType.LOCATION),
+        ({"id": 1, "sender_id": "1", "has_media": True, "mime_type": "video/mp4"}, MessageType.VIDEO),
+        ({"id": 1, "sender_id": "1", "has_media": True, "mime_type": "audio/ogg", "is_voice_note": True}, MessageType.VOICE),
+        ({"id": 1, "sender_id": "1", "has_media": True, "mime_type": "application/pdf"}, MessageType.DOCUMENT),
+    ]
+    for event, expected in cases:
+        assert adapter._message_type_for(event) is expected, event
+
+
+def test_reply_to_is_carried_into_the_message_event():
+    adapter = TelegramUserAdapter(AdapterConfig(), bridge=RecordingBridge())
+
+    message = adapter.event_to_message(
+        {"id": 50, "sender_id": "123", "text": "yes", "reply_to_message_id": 49}
+    )
+
+    assert message.reply_to_message_id == "49"
+
+
+def test_typing_is_suppressed_when_disabled():
+    typing = AsyncMock()
+    adapter = TelegramUserAdapter(
+        AdapterConfig(typing_while_replying=False),
+        bridge=SimpleNamespace(send_typing=typing),
+    )
+
+    asyncio.run(adapter.send_typing("123"))
+
+    typing.assert_not_awaited()
+
+
+def test_typing_failure_does_not_propagate():
+    async def boom(*args, **kwargs):
+        raise httpx.ConnectError("down")
+
+    adapter = TelegramUserAdapter(
+        AdapterConfig(typing_while_replying=True),
+        bridge=SimpleNamespace(send_typing=boom),
+    )
+
+    asyncio.run(adapter.send_typing("123"))  # must not raise
+
+
+def test_enforces_own_access_policy_reflects_allowlist_mode():
+    restricted = TelegramUserAdapter(AdapterConfig(allow_from=["123"]), bridge=RecordingBridge())
+    open_access = TelegramUserAdapter(AdapterConfig(allow_all_users=True), bridge=RecordingBridge())
+
+    assert restricted.enforces_own_access_policy is True
+    assert open_access.enforces_own_access_policy is False
+
+
+def test_register_wires_hermes_native_user_authorization():
+    seen = {}
+
+    class Ctx:
+        def register_platform(self, **kwargs):
+            seen.update(kwargs)
+
+    register(Ctx())
+
+    assert seen["allowed_users_env"] == "HERMES_TG_ALLOWED_USERS"
+    assert seen["allow_all_env"] == "HERMES_TG_ALLOW_ALL_USERS"
+    assert seen["max_message_length"] == 4096
+
+
+def test_explicit_empty_write_to_is_not_overridden_by_allow_from():
+    config = AdapterConfig.from_env_and_extra({"allow_from": ["123"], "write_to": []})
+
+    assert config.allow_from == ["123"]
+    assert config.write_to == []

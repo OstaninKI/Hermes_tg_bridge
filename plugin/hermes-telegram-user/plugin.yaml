@@ -4,9 +4,8 @@ version: 0.1.0
 description: Live Telegram user-account gateway for Hermes Agent
 kind: platform
 author: OstaninKI
-entry_point: adapter.py
-platforms:
-  - telegram_user
+# Hermes imports the plugin package (__init__.py) and calls its register(ctx);
+# there is no entry_point key in the manifest schema.
 requires_env:
   - name: HERMES_TG_BRIDGE_API_TOKEN
     description: Bearer token shared with the hermes-tg-bridge backend
@@ -36,4 +35,12 @@ optional_env:
   - name: HERMES_TG_POLL_INTERVAL_MS
     description: Delay between inbox polls in milliseconds
     prompt: Poll interval ms
+    password: false
+  - name: HERMES_TG_ALLOWED_USERS
+    description: Comma-separated Telegram user ids or usernames allowed to talk to the agent
+    prompt: Allowed users (comma-separated)
+    password: false
+  - name: HERMES_TG_ALLOW_ALL_USERS
+    description: Allow any Telegram user to reach the agent (dev only; backend policy still applies)
+    prompt: Allow all users? (true/false)
     password: false

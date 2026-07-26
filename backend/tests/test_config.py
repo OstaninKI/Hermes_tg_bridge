@@ -11,10 +11,23 @@ from hermes_tg_bridge.auth import resolve_local_session_file, write_session_stri
 from hermes_tg_bridge.config import (
     PolicyStore,
     load_config,
+    normalize_peer_key,
     parse_request_overrides,
     resolve_effective_policy,
     resolve_session_path,
 )
+
+
+def _base_config() -> dict:
+    return {
+        "reply_delay_sec": 1.0,
+        "reply_delay_max_sec": None,
+        "allow_chat_ids": [],
+        "deny_chat_ids": [],
+        "write_allow_chat_ids": [],
+        "write_deny_chat_ids": [],
+        "policy_default_profile": None,
+    }
 
 
 class TestConfigHelpers(unittest.TestCase):
@@ -254,3 +267,73 @@ class TestConfigHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHeaderNarrowingNormalization(unittest.TestCase):
+    """Headers may only narrow the policy — and must agree with it on peer identity."""
+
+    def _policy(self, *, allow: list[str], header: str, key: str = "x-hermes-allow-from") -> dict:
+        store = PolicyStore(None)
+        config = _base_config()
+        config["allow_chat_ids"] = allow
+        overrides = parse_request_overrides({key: header})
+        return resolve_effective_policy(config, store, overrides)
+
+    def test_username_spelling_differences_still_intersect(self) -> None:
+        # Policy says "@Alice", the plugin sends "alice": same person.
+        policy = self._policy(allow=["@Alice"], header="alice")
+        self.assertEqual(policy["read_allow_chat_ids"], ["@Alice"])
+
+    def test_numeric_id_with_padding_still_intersects(self) -> None:
+        policy = self._policy(allow=["123456789"], header=" 123456789 ")
+        self.assertEqual(policy["read_allow_chat_ids"], ["123456789"])
+
+    def test_header_cannot_add_a_peer_the_policy_never_allowed(self) -> None:
+        policy = self._policy(allow=["123"], header="999")
+        self.assertEqual(policy["read_allow_chat_ids"], [])
+
+    def test_header_becomes_the_allowlist_when_policy_is_wide_open(self) -> None:
+        policy = self._policy(allow=["*"], header="123")
+        self.assertEqual(policy["read_allow_chat_ids"], ["123"])
+
+    def test_write_allowlist_narrows_on_normalized_keys_too(self) -> None:
+        store = PolicyStore(None)
+        config = _base_config()
+        config["write_allow_chat_ids"] = ["@Bob"]
+        overrides = parse_request_overrides({"x-hermes-write-to": "BOB"})
+        policy = resolve_effective_policy(config, store, overrides)
+        self.assertEqual(policy["write_allow_chat_ids"], ["@Bob"])
+
+    def test_denylists_merge_without_duplicating_the_same_peer(self) -> None:
+        store = PolicyStore(None)
+        config = _base_config()
+        config["deny_chat_ids"] = ["@Mallory"]
+        overrides = parse_request_overrides({"x-hermes-deny-from": "mallory,eve"})
+        policy = resolve_effective_policy(config, store, overrides)
+        self.assertEqual(len(policy["read_deny_chat_ids"]), 2)
+        normalized = {normalize_peer_key(item) for item in policy["read_deny_chat_ids"]}
+        self.assertEqual(normalized, {"mallory", "eve"})
+
+
+class TestNumericEnvDefaults(unittest.TestCase):
+    """An explicit 0 must survive; `x or default` used to rewrite it."""
+
+    def test_zero_reply_delay_is_honored(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_REPLY_DELAY_SEC": "0"}, clear=False):
+            self.assertEqual(load_config()["reply_delay_sec"], 0.0)
+
+    def test_zero_flood_wait_sleep_is_honored(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC": "0"}, clear=False):
+            self.assertEqual(load_config()["flood_wait_max_sleep_sec"], 0.0)
+
+    def test_missing_value_still_falls_back_to_the_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config()["reply_delay_sec"], 2.0)
+
+    def test_backfill_mode_defaults_to_unread_and_rejects_garbage(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config()["dm_inbox_backfill"], "unread")
+        with patch.dict(os.environ, {"TELEGRAM_DM_INBOX_BACKFILL": "nonsense"}, clear=True):
+            self.assertEqual(load_config()["dm_inbox_backfill"], "unread")
+        with patch.dict(os.environ, {"TELEGRAM_DM_INBOX_BACKFILL": "none"}, clear=True):
+            self.assertEqual(load_config()["dm_inbox_backfill"], "none")

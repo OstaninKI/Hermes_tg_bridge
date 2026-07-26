@@ -79,12 +79,23 @@ python3 -m hermes_tg_bridge.auth_qr
 
 Все опциональны, с безопасными дефолтами. Задаются в systemd `EnvironmentFile`/`Environment`.
 
-- `TELEGRAM_MAX_SENDS_PER_MIN` - жёсткий предел исходящих отправок в минуту на процесс, default `25` (предохранитель от runaway-агента);
+- `TELEGRAM_MAX_SENDS_PER_MIN` - жёсткий предел исходящих отправок в минуту на процесс, default `25` (предохранитель от runaway-агента). Длинное сообщение, которое режется на N частей, списывает N единиц лимита;
 - `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` - до скольких секунд FloodWait backend ждёт и ретраит сам, прежде чем вернуть `429 Retry-After`, default `30`;
+- `TELEGRAM_REPLY_DELAY_SEC` - пауза перед исходящей отправкой, default `2`. Явный `0` теперь уважается;
 - `TELEGRAM_IDEMPOTENCY_TTL_SEC` - TTL кэша идемпотентности отправок, default `600`;
 - `TELEGRAM_IDEMPOTENCY_MAX_KEYS` - размер кэша идемпотентности, default `1000`;
+- `TELEGRAM_DM_INBOX_BACKFILL` - что делать с сообщениями, пришедшими до первого старта: `unread` (default) - обработать непрочитанные, `none` - только новые, `all` - проиграть недавнюю историю;
+- `TELEGRAM_DM_MEDIA_RETENTION_DAYS` - через сколько дней удалять скачанные входящие вложения, default `7`, `0` отключает уборку;
 - `HERMES_QR_PASSWORD_TIMEOUT` - таймаут ожидания 2FA-пароля в QR-авторизации, секунды, default `180`;
-- `TELEGRAM_DISABLE_EXTENDED_API=1` - отключить расширенные (не-core) операции.
+- `TELEGRAM_DISABLE_EXTENDED_API=1` - оставить только endpoints, нужные Hermes gateway (`/health`, `/me`, `/send_message`, `/dm/*`, `/auth/qr/*`); все остальные отдают `404`.
+
+### Первый запуск и старые сообщения
+
+При первом обращении к `/dm/inbox/poll` для каждого разрешённого отправителя backend
+берёт стартовую позицию курсора из состояния прочтения самого Telegram. По умолчанию
+(`TELEGRAM_DM_INBOX_BACKFILL=unread`) агент получит ровно то, что осталось непрочитанным,
+а не всю недавнюю переписку. Позиция сохраняется в `dm_inbox_state.json`, поэтому
+подбор выполняется один раз на отправителя.
 
 ### Idempotency
 
@@ -92,4 +103,6 @@ Send-эндпоинты (`send_message`, `send_file`, `send_voice`, `send_sticke
 
 ## Extended API
 
-Backend реализует дополнительные операции Telegram, выходящие за пределы scope gateway (отправка файлов/голоса/стикеров/локации, редактирование/удаление/пересылка сообщений, управление контактами и источниками). Все эти endpoints защищены Bearer auth и backend policy. Это реализованные, но не входящие в core gateway scope операции, указанные в spec как "Deferred Work". Их можно отключить, установив env `TELEGRAM_DISABLE_EXTENDED_API=1`.
+Backend реализует дополнительные операции Telegram, выходящие за пределы scope gateway (отправка файлов/голоса/стикеров/локации, редактирование/удаление/пересылка сообщений, чтение истории и диалогов, управление контактами, группами, каналами и правами). Все эти endpoints защищены Bearer auth и backend policy; привилегированные операции дополнительно требуют, чтобы write-scope включал `me` или `*`, поэтому при обычной DM-policy они отдают `403`.
+
+Это реализованные, но не входящие в core gateway scope операции, указанные в spec как "Deferred Work". `TELEGRAM_DISABLE_EXTENDED_API=1` убирает их все разом: список разрешённого задан явным перечнем core-путей, поэтому любой новый endpoint по умолчанию попадает под запрет, а не мимо него.

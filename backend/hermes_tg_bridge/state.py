@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -135,10 +136,20 @@ class JsonStateStore:
                 self._mtime_ns = None
                 return
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            payload = json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+            # Write-then-rename: a crash mid-write would otherwise leave truncated
+            # JSON behind, and every later load() would raise until someone deleted
+            # the file by hand. os.replace is atomic within a filesystem.
+            tmp_path = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self._path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             self._cache = data
             self._mtime_ns = self._path.stat().st_mtime_ns
 
@@ -281,6 +292,39 @@ class DmCursorStore(JsonStateStore):
             for sender_key, value in consumer.items()
             if isinstance(value, (int, float))
         }
+
+    def has_cursor(self, consumer_id: str, sender_key: str) -> bool:
+        """Whether this consumer has ever recorded a position for this sender.
+
+        Distinct from ``get_cursor() == 0``: a genuinely absent cursor means the
+        bridge has never served this conversation and needs a starting baseline,
+        while a stored 0 means "start from the beginning" and must be respected.
+        """
+        data = self.load()
+        consumers = data.get("consumers", {})
+        if not isinstance(consumers, dict):
+            return False
+        consumer = consumers.get(consumer_id, {})
+        return isinstance(consumer, dict) and sender_key in consumer
+
+    def ensure_cursor(self, consumer_id: str, sender_key: str, message_id: int) -> int:
+        """Record a starting cursor for a sender we have never served before."""
+        with self._lock:
+            if self.has_cursor(consumer_id, sender_key):
+                return self.get_cursor(consumer_id, sender_key)
+            data = self.load()
+            consumers = data.setdefault("consumers", {})
+            if not isinstance(consumers, dict):
+                consumers = {}
+                data["consumers"] = consumers
+            consumer = consumers.setdefault(consumer_id, {})
+            if not isinstance(consumer, dict):
+                consumer = {}
+                consumers[consumer_id] = consumer
+            baseline = max(0, int(message_id))
+            consumer[sender_key] = baseline
+            self.save(data)
+            return baseline
 
     def ack(self, consumer_id: str, sender_key: str, message_id: int) -> int:
         with self._lock:
