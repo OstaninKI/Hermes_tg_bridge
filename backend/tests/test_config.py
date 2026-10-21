@@ -315,6 +315,37 @@ class TestHeaderNarrowingNormalization(unittest.TestCase):
         self.assertEqual(normalized, {"mallory", "eve"})
 
 
+class TestProxyConfig(unittest.TestCase):
+    """A broken proxy setting must stop startup, never fall back to a direct connection."""
+
+    def test_misconfigured_proxy_fails_closed(self) -> None:
+        for env in (
+            {"TELEGRAM_PROXY_TYPE": "socks"},
+            {"TELEGRAM_PROXY_TYPE": "mtproxy", "TELEGRAM_PROXY_HOST": "proxy.example"},
+            {"TELEGRAM_PROXY_TYPE": "socks5", "TELEGRAM_PROXY_PORT": "1080"},
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(ValueError):
+                    load_config()
+
+    def test_socks5_without_python_socks_fails_closed(self) -> None:
+        env = {"TELEGRAM_PROXY_TYPE": "socks5", "TELEGRAM_PROXY_HOST": "proxy.example", "TELEGRAM_PROXY_PORT": "1080"}
+        with patch.dict(os.environ, env, clear=True), patch(
+            "hermes_tg_bridge.config.importlib.util.find_spec", return_value=None
+        ):
+            with self.assertRaisesRegex(ValueError, "python-socks"):
+                load_config()
+
+    def test_valid_proxies_are_parsed(self) -> None:
+        env = {"TELEGRAM_PROXY_HOST": "proxy.example", "TELEGRAM_PROXY_PORT": "1080"}
+        with patch.dict(os.environ, {**env, "TELEGRAM_PROXY_TYPE": "MTProxy"}, clear=True):
+            self.assertEqual(load_config()["proxy"], ("mtproxy", "proxy.example", 1080, "0" * 32))
+        with patch.dict(os.environ, {**env, "TELEGRAM_PROXY_TYPE": "socks5"}, clear=True), patch(
+            "hermes_tg_bridge.config.importlib.util.find_spec", return_value=object()
+        ):
+            self.assertEqual(load_config()["proxy"], ("socks5", "proxy.example", 1080))
+
+
 class TestNumericEnvDefaults(unittest.TestCase):
     """An explicit 0 must survive; `x or default` used to rewrite it."""
 

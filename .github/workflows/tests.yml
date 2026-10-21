@@ -34,7 +34,7 @@ jobs:
           python-version: ${{ matrix.python }}
           activate-environment: "true"
           enable-cache: "false"
-      - run: uv pip compile pyproject.toml --extra dev --resolution ${{ matrix.resolution }} -o "$RUNNER_TEMP/requirements.txt"
+      - run: uv pip compile pyproject.toml --extra dev --extra proxy --extra fast --resolution ${{ matrix.resolution }} -o "$RUNNER_TEMP/requirements.txt"
       - run: uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off
       - run: uv pip install -r "$RUNNER_TEMP/requirements.txt" && uv pip install --no-deps .
       - run: python -m pytest -q

@@ -1,5 +1,6 @@
 """Configuration from environment, policy files, and request overrides."""
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -188,18 +189,22 @@ def load_config() -> dict[str, Any]:
     if dm_inbox_backfill not in {"unread", "none", "all"}:
         dm_inbox_backfill = "unread"
 
+    # A misconfigured proxy fails startup instead of silently connecting directly.
     proxy = None
     proxy_type = os.environ.get("TELEGRAM_PROXY_TYPE", "").strip().lower()
-    if proxy_type == "socks5":
+    if proxy_type:
+        if proxy_type not in {"socks5", "mtproxy"}:
+            raise ValueError(f"Invalid TELEGRAM_PROXY_TYPE: {proxy_type!r} (use socks5 or mtproxy)")
         host = os.environ.get("TELEGRAM_PROXY_HOST", "").strip()
         port = _get_int("TELEGRAM_PROXY_PORT")
-        if host and port:
+        if not host or not port:
+            raise ValueError("TELEGRAM_PROXY_TYPE is set but TELEGRAM_PROXY_HOST or TELEGRAM_PROXY_PORT is missing")
+        if proxy_type == "socks5":
+            if importlib.util.find_spec("python_socks") is None and importlib.util.find_spec("socks") is None:
+                raise ValueError("TELEGRAM_PROXY_TYPE=socks5 needs python-socks: pip install './backend[proxy]'")
             proxy = ("socks5", host, port)
-    elif proxy_type == "mtproxy":
-        host = os.environ.get("TELEGRAM_PROXY_HOST", "").strip()
-        port = _get_int("TELEGRAM_PROXY_PORT")
-        secret = os.environ.get("TELEGRAM_PROXY_SECRET", "00000000000000000000000000000000").strip()
-        if host and port:
+        else:
+            secret = os.environ.get("TELEGRAM_PROXY_SECRET", "00000000000000000000000000000000").strip()
             proxy = ("mtproxy", host, port, secret)
 
     resolved_dm_media_path = dm_media_path or str(default_state_dir / "dm_inbox_media")

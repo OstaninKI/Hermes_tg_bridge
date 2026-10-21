@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.2.0
+version: 1.3.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -91,7 +91,7 @@ Remember the answer as `HOME_CHANNEL`.
 id hermes-tg >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/hermes-tg-bridge --shell /usr/sbin/nologin hermes-tg
 [ -d /opt/hermes-tg-bridge/.git ] || sudo git clone https://github.com/OstaninKI/Hermes_tg_bridge.git /opt/hermes-tg-bridge
 sudo python3 -m venv /opt/hermes-tg-bridge/backend/.venv
-sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install -q /opt/hermes-tg-bridge/backend
+sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install -q '/opt/hermes-tg-bridge/backend[fast]'
 sudo install -d -o hermes-tg -g hermes-tg -m 0700 /var/lib/hermes-tg-bridge
 sudo install -d -o hermes-tg -g hermes-tg -m 2750 /var/lib/hermes-tg-bridge-media
 sudo install -d -o root -g hermes-tg -m 0750 /etc/hermes-tg-bridge

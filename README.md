@@ -58,7 +58,7 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 | Component | Supported |
 |---|---|
 | Hermes Agent | v0.22.x (tested on v0.22.4); Hermes itself needs Python 3.11–3.14 |
-| Backend | Python 3.11–3.14 (CI tests both ends, with the oldest and newest allowed dependencies), Telethon 1.43.2–1.45.x, FastAPI ≥ 0.133, Starlette ≥ 1.3.1 |
+| Backend | Python 3.11–3.14 (CI tests both ends, with the oldest and newest allowed dependencies), Telethon 1.45.x, FastAPI ≥ 0.133, Starlette ≥ 1.3.1 |
 | OS | Linux with systemd for the documented deployment; the backend itself runs anywhere Python does |
 
 ## Agent-assisted install
@@ -104,11 +104,13 @@ Use your own `api_id`; never borrow one. Telegram's API terms forbid the word "T
 sudo useradd --system --home-dir /var/lib/hermes-tg-bridge --shell /usr/sbin/nologin hermes-tg
 sudo git clone https://github.com/OstaninKI/Hermes_tg_bridge.git /opt/hermes-tg-bridge
 sudo python3 -m venv /opt/hermes-tg-bridge/backend/.venv
-sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install /opt/hermes-tg-bridge/backend
+sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install '/opt/hermes-tg-bridge/backend[fast]'
 sudo install -d -o hermes-tg -g hermes-tg -m 0700 /var/lib/hermes-tg-bridge
 sudo install -d -o hermes-tg -g hermes-tg -m 2750 /var/lib/hermes-tg-bridge-media
 sudo install -d -o root -g hermes-tg -m 0750 /etc/hermes-tg-bridge
 ```
+
+`[fast]` adds [cryptg](https://pypi.org/project/cryptg/), native encryption for Telethon that makes media transfers much faster. Drop it if it does not install on your platform. To connect through a SOCKS5 proxy, install `[fast,proxy]` instead (see `TELEGRAM_PROXY_TYPE` below).
 
 ### 3. Configure secrets and policy
 
@@ -226,7 +228,7 @@ All optional; set them in the systemd unit or `secret.env`.
 | `TELEGRAM_DM_MEDIA_RETENTION_DAYS` | `7` | Delete downloaded inbound media after N days; `0` disables cleanup |
 | `HERMES_QR_PASSWORD_TIMEOUT` | `180` | Seconds the QR login waits for the 2FA password |
 | `TELEGRAM_DISABLE_EXTENDED_API` | off | `1` keeps only the endpoints the gateway needs (`/health`, `/me`, `/send_message`, `/dm/*`, `/auth/qr/*`); the rest return `404` |
-| `TELEGRAM_PROXY_TYPE` / `_HOST` / `_PORT` / `_SECRET` | — | `socks5` or `mtproxy` connection to Telegram |
+| `TELEGRAM_PROXY_TYPE` / `_HOST` / `_PORT` / `_SECRET` | — | `socks5` (needs the `[proxy]` extra) or `mtproxy` connection to Telegram. A wrong type or missing host/port stops the backend from starting; it never falls back to a direct connection |
 
 State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/telethon` if that is unset. Override them with `TELEGRAM_SESSION_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_DM_MEDIA_PATH` and `TELEGRAM_LOCK_PATH`, as the example unit does.
 
@@ -297,6 +299,8 @@ This project is [MIT-licensed](LICENSE) and provided "as is", without warranty. 
 | Starlette, Uvicorn, httpx | BSD-3-Clause | PyPI |
 | qrcode | BSD | PyPI |
 | Pillow | MIT-CMU | PyPI |
+| cryptg (optional, `[fast]`) | CC0-1.0 | PyPI |
+| python-socks (optional, `[proxy]`) | Apache-2.0 | PyPI |
 | Hermes Agent (not a dependency; the plugin runs inside it) | MIT | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
 
 ### First start and old messages
