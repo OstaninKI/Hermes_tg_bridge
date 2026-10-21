@@ -1,5 +1,7 @@
 import asyncio
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +17,8 @@ from adapter import (
     PlatformConfig,
     SendResult,
     TelegramUserAdapter,
+    _env_enablement,
+    _standalone_send,
     build_policy_headers,
     register,
 )
@@ -406,7 +410,7 @@ def test_adapter_extends_hermes_base_adapter():
     )
 
     assert isinstance(adapter, BasePlatformAdapter)
-    assert str(adapter.platform) == "telegram_user"
+    assert getattr(adapter.platform, "value", adapter.platform) == "telegram_user"
     assert adapter.adapter_config.api_token == "token"
 
 
@@ -433,6 +437,9 @@ def test_register_uses_hermes_plugin_registry_contract():
     )
     assert isinstance(adapter, TelegramUserAdapter)
     assert adapter.adapter_config.bridge_url == "http://bridge.test"
+    assert seen["allowlist_suppresses_pairing"] is True
+    assert seen["cron_deliver_env_var"] == "HERMES_TG_HOME_CHANNEL"
+    assert seen["standalone_sender_fn"] is _standalone_send
 
 
 def test_poll_loop_401_sets_fatal_and_exits():
@@ -637,7 +644,7 @@ def test_failing_event_is_retried_then_dropped_to_unblock_the_inbox():
     async def always_fails(_message):
         raise RuntimeError("agent exploded")
 
-    adapter._message_handler = always_fails
+    adapter.handle_message = always_fails  # admission failure; agent errors run in a background task upstream
     event = {"id": 42, "sender_id": "123", "text": "poison"}
 
     async def scenario():
@@ -663,7 +670,7 @@ def test_successful_event_clears_previous_failures():
         if fail:
             raise RuntimeError("transient")
 
-    adapter._message_handler = flaky
+    adapter.handle_message = flaky
     event = {"id": 43, "sender_id": "123", "text": "hi"}
 
     async def scenario():
@@ -701,7 +708,9 @@ def test_media_paths_are_attached_to_the_message(tmp_path):
     asyncio.run(adapter._attach_media(event, message))
 
     assert message.message_type == MessageType.PHOTO
-    assert message.media_urls == [str(photo)]
+    # Standalone shim passes the path through; real Hermes copies it into its media cache.
+    assert len(message.media_urls) == 1
+    assert Path(message.media_urls[0]).read_bytes() == photo.read_bytes()
     assert message.media_types == ["image/jpeg"]
 
 
@@ -799,3 +808,50 @@ def test_explicit_empty_write_to_is_not_overridden_by_allow_from():
 
     assert config.allow_from == ["123"]
     assert config.write_to == []
+
+
+def test_standalone_send_posts_through_bridge_and_closes_client(monkeypatch):
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/send_message":
+            return httpx.Response(200, json={"message_id": 77})
+        return httpx.Response(429, headers={"Retry-After": "3"}, json={"detail": "slow down"})
+
+    clients = []
+
+    def fake_client(config):
+        clients.append(_make_bridge_client(handler, config))
+        return clients[-1]
+
+    monkeypatch.setattr(sys.modules["adapter"], "BridgeClient", fake_client)
+    pconfig = PlatformConfig(extra={"api_token": "token", "bridge_url": "http://bridge.test"})
+
+    ok = asyncio.run(_standalone_send(pconfig, "123", "cron says hi"))
+    assert ok == {"success": True, "message_id": "77"}
+    assert json.loads(requests[0].content) == {"peer": "123", "text": "cron says hi", "reply_to": None}
+    assert requests[0].headers["Authorization"] == "Bearer token"
+    assert clients[0].client.is_closed
+
+    assert "text only" in asyncio.run(_standalone_send(pconfig, "123", "x", media_files=["/a.png"]))["error"]
+
+
+def test_standalone_send_reports_bridge_error_and_missing_token(monkeypatch):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": "peer not in write_to"})
+
+    monkeypatch.setattr(sys.modules["adapter"], "BridgeClient", lambda c: _make_bridge_client(handler, c))
+    monkeypatch.delenv("HERMES_TG_BRIDGE_API_TOKEN", raising=False)
+
+    err = asyncio.run(_standalone_send(PlatformConfig(extra={"api_token": "t"}), "9", "hi"))
+    assert err == {"error": "HTTP 403: peer not in write_to"}
+    assert "API_TOKEN" in asyncio.run(_standalone_send(PlatformConfig(), "9", "hi"))["error"]
+
+
+def test_env_enablement_seeds_home_channel(monkeypatch):
+    monkeypatch.setenv("HERMES_TG_BRIDGE_API_TOKEN", "t")
+    monkeypatch.setenv("HERMES_TG_HOME_CHANNEL", "123")
+    assert _env_enablement()["home_channel"] == {"chat_id": "123", "name": "Home"}
+    monkeypatch.delenv("HERMES_TG_HOME_CHANNEL")
+    assert "home_channel" not in _env_enablement()

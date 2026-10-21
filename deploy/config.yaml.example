@@ -10,6 +10,12 @@ gateway:
   platforms:
     telegram_user:
       enabled: true
+      # Where cron jobs with deliver=telegram_user go (or set HERMES_TG_HOME_CHANNEL).
+      # Must also be allowed by the backend write_to policy.
+      home_channel:
+        platform: telegram_user
+        chat_id: "<your-telegram-user-id>"
+        name: "Home"
       extra:
         bridge_url: "http://127.0.0.1:8765"
         # Same token as TELEGRAM_BRIDGE_API_TOKEN on the backend.

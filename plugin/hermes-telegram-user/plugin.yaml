@@ -36,6 +36,10 @@ optional_env:
     description: Delay between inbox polls in milliseconds
     prompt: Poll interval ms
     password: false
+  - name: HERMES_TG_HOME_CHANNEL
+    description: Telegram user id or username that cron jobs with deliver=telegram_user send to
+    prompt: Home channel (cron delivery)
+    password: false
   - name: HERMES_TG_ALLOWED_USERS
     description: Comma-separated Telegram user ids or usernames allowed to talk to the agent
     prompt: Allowed users (comma-separated)

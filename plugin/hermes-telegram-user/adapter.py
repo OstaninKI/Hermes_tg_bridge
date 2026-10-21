@@ -429,7 +429,10 @@ class TelegramUserAdapter(BasePlatformAdapter):
     platform_name = "telegram_user"
 
     def __init__(self, config: AdapterConfig | PlatformConfig, bridge: Any | None = None) -> None:
-        super().__init__(config=config, platform=Platform(self.platform_name))
+        # The base adapter reads PlatformConfig fields (extra, typing_indicator, ...),
+        # so it must never see our own AdapterConfig.
+        base_config = PlatformConfig() if isinstance(config, AdapterConfig) else config
+        super().__init__(config=base_config, platform=Platform(self.platform_name))
         extra = getattr(config, "extra", {}) if not isinstance(config, AdapterConfig) else {}
         self.adapter_config = config if isinstance(config, AdapterConfig) else AdapterConfig.from_env_and_extra(extra)
         self.bridge = bridge or BridgeClient(self.adapter_config)
@@ -797,6 +800,9 @@ def _send_failure(exc: Exception) -> SendResult:
     )
 
 
+HOME_CHANNEL_ENV = "HERMES_TG_HOME_CHANNEL"
+
+
 def check_requirements() -> bool:
     """Dependency check. Configuration is validated separately by validate_config."""
     return httpx is not None
@@ -806,6 +812,35 @@ def validate_config(config: Any) -> bool:
     extra = getattr(config, "extra", {}) or {}
     adapter_config = AdapterConfig.from_env_and_extra(extra)
     return bool(adapter_config.bridge_url and adapter_config.api_token)
+
+
+async def _standalone_send(
+    pconfig: Any,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: str | None = None,
+    media_files: list[str] | None = None,
+    force_document: bool = False,
+) -> dict[str, Any]:
+    """One-shot send through the bridge when no gateway runs in-process (``hermes cron``)."""
+    if media_files:
+        # ponytail: text only; the bridge has /send_file, wire it here if cron needs attachments.
+        return {"error": "telegram_user standalone delivery supports text only"}
+    if not chat_id:
+        return {"error": "chat_id is required"}
+    config = AdapterConfig.from_env_and_extra(getattr(pconfig, "extra", {}) or {})
+    if not config.api_token:
+        return {"error": "HERMES_TG_BRIDGE_API_TOKEN is not set"}
+    bridge = BridgeClient(config)
+    try:
+        payload = await bridge.send_message(chat_id, message)
+    except Exception as exc:
+        return {"error": _send_failure(exc).error}
+    finally:
+        await bridge.close()
+    message_id = payload.get("message_id", payload.get("id")) if isinstance(payload, dict) else None
+    return {"success": True, "message_id": str(message_id) if message_id is not None else None}
 
 
 def _env_enablement() -> dict[str, Any] | None:
@@ -824,6 +859,9 @@ def _env_enablement() -> dict[str, Any] | None:
         value = os.getenv(env_name)
         if value is not None and value != "":
             seed[extra_key] = value
+    home = os.getenv(HOME_CHANNEL_ENV, "").strip()
+    if home:
+        seed["home_channel"] = {"chat_id": home, "name": "Home"}
     return seed
 
 
@@ -839,6 +877,10 @@ def register(ctx: Any) -> Any:
         env_enablement_fn=_env_enablement,
         allowed_users_env="HERMES_TG_ALLOWED_USERS",
         allow_all_env="HERMES_TG_ALLOW_ALL_USERS",
+        # Pairing codes would go out from the owner's personal account to strangers.
+        allowlist_suppresses_pairing=True,
+        cron_deliver_env_var=HOME_CHANNEL_ENV,
+        standalone_sender_fn=_standalone_send,
         max_message_length=4096,
         emoji="📲",
         pii_safe=False,

@@ -21,13 +21,24 @@ Platform name: `telegram_user`
 - `HERMES_TG_MARK_READ_ON_INBOUND` - `true`/`false`, default `true`;
 - `HERMES_TG_TYPING_WHILE_REPLYING` - `true`/`false`, default `true`;
 - `HERMES_TG_POLL_TIMEOUT_MS` - default `25000`;
-- `HERMES_TG_POLL_INTERVAL_MS` - default `1500`.
+- `HERMES_TG_POLL_INTERVAL_MS` - default `1500`;
+- `HERMES_TG_HOME_CHANNEL` - Telegram id/username для cron-доставки `deliver=telegram_user`.
 
 `gateway.platforms.telegram_user.extra` can provide the same settings as fallback values, but env vars win.
 
 `HERMES_TG_ALLOWED_USERS` / `HERMES_TG_ALLOW_ALL_USERS` дополнительно зарегистрированы
 как `allowed_users_env` / `allow_all_env`, поэтому Hermes применяет к ним свою штатную
-проверку авторизации пользователя, а не только фильтр внутри адаптера.
+проверку авторизации пользователя, а не только фильтр внутри адаптера. Платформа
+зарегистрирована с `allowlist_suppresses_pairing=True`: при заданном allowlist Hermes не
+отправляет незнакомцам pairing-код с личного аккаунта владельца.
+
+## Cron delivery
+
+Задайте `HERMES_TG_HOME_CHANNEL`, и cron-задачи с `deliver=telegram_user` уйдут в этот
+чат. Если gateway не запущен в том же процессе (`hermes cron`), плагин отправляет напрямую
+через backend (`standalone_sender_fn`) с тем же токеном и policy-заголовками. Пока только
+текст: вложения в standalone-режиме возвращают ошибку, а не теряются молча. Получатель
+должен быть разрешён в backend `write_to`.
 
 ## Installation / discovery
 
@@ -45,8 +56,8 @@ Hermes находит directory-based плагин по манифесту `plug
 - **Медиа.** Backend скачивает вложения; адаптер перекладывает их байты в media-кэш Hermes
   через `cache_media_bytes` и проставляет `media_urls`/`media_types`, чтобы файл был виден
   агенту (в т.ч. vision-инструментам). Файлы больше 100 МБ пропускаются с записью в лог.
-- **Сбойные сообщения.** Одно сообщение повторяется до 10 раз; после этого оно ack-ается
-  принудительно, чтобы очередь не встала. Отфильтрованные по `allow_from` события тоже
+- **Сбойные сообщения.** Если Hermes не принял сообщение (`handle_message` упал), оно
+  повторяется до 10 раз; после этого оно ack-ается принудительно, чтобы очередь не встала. Отфильтрованные по `allow_from` события тоже
   ack-аются — иначе backend отдавал бы их на каждом опросе бесконечно.
 - **Дубликаты при отправке.** Каждый `send()` уходит с `Idempotency-Key`, стабильным для
   повторов одного и того же сообщения в пределах 120 секунд, поэтому ретрай после

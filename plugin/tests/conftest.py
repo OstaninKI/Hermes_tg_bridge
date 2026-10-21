@@ -50,3 +50,17 @@ load_plugin_package()
 
 # Expose the adapter submodule under a short alias so tests can ``import adapter``.
 sys.modules.setdefault("adapter", sys.modules[f"{MODULE_NAME}.adapter"])
+
+# Against a real Hermes install, Platform("telegram_user") only resolves once the
+# platform is in the registry, which Hermes does via register(ctx) before building
+# adapters. Mirror that so the suite also runs against the real gateway.
+try:
+    from gateway.platform_registry import PlatformEntry, platform_registry
+except ImportError:
+    pass
+else:
+    class _Ctx:
+        def register_platform(self, **kwargs):
+            platform_registry.register(PlatformEntry(source="plugin", **kwargs))
+
+    sys.modules[MODULE_NAME].register(_Ctx())

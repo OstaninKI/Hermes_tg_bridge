@@ -9,6 +9,11 @@
 - `deploy/` - примеры systemd, policy и Hermes config;
 - `create_telethon_session.sh` - локальная авторизация Telegram user session.
 
+## Совместимость
+
+- Hermes Agent v0.22.x (проверено на v0.22.4); сам Hermes требует Python 3.11–3.14.
+- Backend: Python >= 3.10, Telethon 1.43.2–1.45.x.
+
 ## Setup
 
 1. Создайте virtualenv для backend и установите зависимости из `backend/`.
@@ -56,6 +61,7 @@ python3 -m hermes_tg_bridge.auth_qr
 - `HERMES_TG_TYPING_WHILE_REPLYING`
 - `HERMES_TG_POLL_TIMEOUT_MS`
 - `HERMES_TG_POLL_INTERVAL_MS`
+- `HERMES_TG_HOME_CHANNEL` - чат для cron `deliver=telegram_user`
 
 Приоритет конфигурации:
 
@@ -64,9 +70,18 @@ python3 -m hermes_tg_bridge.auth_qr
 
 Пример: [deploy/config.yaml.example](./deploy/config.yaml.example)
 
+## Cron delivery
+
+Cron-задачи Hermes с `deliver=telegram_user` отправляются в чат из `HERMES_TG_HOME_CHANNEL`
+(Telegram id или username) либо из `gateway.platforms.telegram_user.home_channel` в `config.yaml`.
+Если gateway не запущен в процессе cron, плагин шлёт напрямую через backend. Поддерживается
+только текст; получатель должен быть разрешён в backend `write_to`. Подробнее:
+[plugin README](./plugin/hermes-telegram-user/README.md#cron-delivery).
+
 ## Safety defaults
 
 - backend binds only to `127.0.0.1`;
+- при заданном `HERMES_TG_ALLOWED_USERS` Hermes не шлёт незнакомцам pairing-коды с личного аккаунта;
 - API token обязателен для deployed setup;
 - read/write allowlists задаются только в backend policy, а не в plugin config;
 - request-заголовки `X-Hermes-Allow-From` / `X-Hermes-Write-To` могут только **сузить** backend allowlist (пересечение), но не расширить его сверх policy;
