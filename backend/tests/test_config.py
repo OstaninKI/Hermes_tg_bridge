@@ -228,7 +228,7 @@ class TestConfigHelpers(unittest.TestCase):
         service_file = Path(__file__).resolve().parents[2] / "deploy" / "hermes-tg-bridge.service"
         service = service_file.read_text(encoding="utf-8")
 
-        self.assertIn("EnvironmentFile=-/etc/hermes-tg-bridge/secret.env", service)
+        self.assertIn("EnvironmentFile=/etc/hermes-tg-bridge/secret.env", service)
         self.assertNotIn("Environment=TELEGRAM_BRIDGE_API_TOKEN=", service)
         self.assertIn("Environment=TELEGRAM_POLICY_PATH=", service)
         self.assertNotIn("HERMES_TG_BRIDGE_API_TOKEN", service)
