@@ -822,14 +822,12 @@ class BridgeClient:
         file_path = str(file_path or "").strip()
         if not file_path:
             raise BridgeValidationError("file_path is required.")
-        path = Path(file_path).expanduser()
-        if not path.exists() or not path.is_file():
-            raise BridgeValidationError("File does not exist on the backend host.")
-        resolved = path.resolve()
-        if not self._allowed_file_roots:
-            raise BridgeForbiddenError("File uploads must be inside configured allowed upload roots.")
+        resolved = Path(file_path).expanduser().resolve()
+        # Check roots before touching the filesystem, so callers cannot probe paths outside them.
         if not any(_is_path_inside(resolved, root) for root in self._allowed_file_roots):
             raise BridgeForbiddenError("File uploads must be inside configured allowed upload roots.")
+        if not resolved.is_file():
+            raise BridgeValidationError("File does not exist on the backend host.")
         return str(resolved)
 
     def _resolve_download_target(self, output_path: str | None) -> str:
@@ -848,11 +846,13 @@ class BridgeClient:
         return str(resolved)
 
     def _resolve_inbox_download_target(self, output_path: str) -> str:
+        if self._media_download_root is None:
+            raise BridgeForbiddenError("Media downloads require a configured download root.")
         output_text = str(output_path or "").strip()
         if not output_text:
             raise BridgeValidationError("output_path is required.")
         resolved = Path(output_text).expanduser().resolve()
-        if self._media_download_root is not None and not _is_path_inside(resolved, self._media_download_root):
+        if not _is_path_inside(resolved, self._media_download_root):
             raise BridgeForbiddenError("Media download output must be inside the configured download root.")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return str(resolved)

@@ -892,8 +892,16 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
 
         self.mock_tg.download_media.assert_not_awaited()
 
-    async def test_download_media_for_inbox_returns_none_for_non_media_message(self) -> None:
+    async def test_download_media_for_inbox_requires_download_root(self) -> None:
         bridge = self.create_bridge(allow_chat_ids=["42"])
+
+        with self.assertRaises(BridgeForbiddenError):
+            await bridge.download_media_for_inbox("42", 82, output_path="/etc/passwd")
+
+        self.mock_tg.download_media.assert_not_awaited()
+
+    async def test_download_media_for_inbox_returns_none_for_non_media_message(self) -> None:
+        bridge = self.create_bridge(allow_chat_ids=["42"], media_download_root="/tmp/inbox")
         entity = SimpleNamespace(id=42, username="allowed")
         tg_message = SimpleNamespace(
             id=82,
