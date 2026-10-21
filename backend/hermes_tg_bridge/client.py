@@ -320,6 +320,13 @@ def _is_video_note(message: Any) -> bool:
     return False
 
 
+def _is_self_destructing(message: Any) -> bool:
+    # Telegram API terms §1.4: self-destructing content must be allowed to disappear, so never save it.
+    ttl_seconds = getattr(getattr(message, "media", None), "ttl_seconds", None)
+    ttl_period = getattr(message, "ttl_period", None)
+    return bool(isinstance(ttl_seconds, int) and ttl_seconds > 0) or bool(isinstance(ttl_period, int) and ttl_period > 0)
+
+
 def _extract_media_summary(message: Any, *, premium: bool | None = None) -> dict[str, Any]:
     media = getattr(message, "media", None)
     file = getattr(message, "file", None)
@@ -1480,6 +1487,8 @@ class BridgeClient:
             raise BridgeValidationError("Message not found.")
         if getattr(tg_message, "media", None) is None:
             raise BridgeValidationError("Message does not contain downloadable media.")
+        if _is_self_destructing(tg_message):
+            raise BridgeForbiddenError("Self-destructing media is never saved.")
         file_path = await self._call_telegram(
             self._client.download_media,
             tg_message,
@@ -1519,7 +1528,7 @@ class BridgeClient:
             ids=message_id,
             action="download inbound media",
         )
-        if tg_message is None or getattr(tg_message, "media", None) is None:
+        if tg_message is None or getattr(tg_message, "media", None) is None or _is_self_destructing(tg_message):
             return None
         return await self._call_telegram(
             self._client.download_media,

@@ -1,4 +1,4 @@
-# Hermes Telegram Bridge: Hermes Agent on your personal Telegram account (userbot, not a bot)
+# Hermes Telegram Bridge: Hermes Agent acting on your behalf in your personal Telegram account (not a bot)
 
 > **AI agent asked to install this?** Don't improvise from this README. Read and follow the setup skill step by step:
 > <https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md>
@@ -16,7 +16,7 @@ Hermes' built-in Telegram channel needs a bot made with @BotFather, so people ha
 
 > [!WARNING]
 > **Unofficial project, use at your own risk.** It is not affiliated with or endorsed by Telegram or Nous Research.
-> - Telegram can limit or **ban an account** that is automated or reported as spam, and it gives no compensation.
+> - The agent writes **on your behalf, from your account**. Everything it sends counts as yours under Telegram's terms. If recipients report it as spam, Telegram can **limit or ban the account**, and it gives no compensation.
 > - Under Telegram's terms, passing your contacts' messages to an AI model needs **their explicit consent**. Tell everyone you allowlist that an AI answers them.
 >
 > Read [Legal and Telegram terms](#legal-and-telegram-terms) before installing.
@@ -25,7 +25,7 @@ Hermes' built-in Telegram channel needs a bot made with @BotFather, so people ha
 
 - **Native Hermes platform plugin**, not a wrapper script. DMs show up in the Hermes gateway like any other channel, sessions and memory included.
 - **Allowlists both ways**: who may write to the agent and who the agent may write to. Enforced in the backend, so the agent cannot widen them.
-- **Behaves like a normal client**: marks messages read, shows "typing…", waits a bit before sending. It never hides read receipts or fakes your online status.
+- **Behaves like a normal client**: marks messages read, shows "typing…", waits a bit before sending. It never hides read receipts, never fakes your online status and never saves self-destructing media.
 - **Ban-safety fuses**: a per-minute send cap and FloodWait handling, so a runaway agent cannot spam from your account.
 - **Hardened deployment**: the Telegram session lives under a separate system user; the backend listens on `127.0.0.1` only, behind a bearer token.
 - **QR login** with 2FA, no phone code to type into a server.
@@ -257,17 +257,30 @@ API terms §1.5 and the content-licensing terms forbid using Telegram data to tr
 
 The allowlist-only design exists to make this workable: the agent only ever sees chats you chose.
 
-### Account automation and bans
+### Acting on your behalf
 
-Telegram's terms do not explicitly allow automating a user account (a "userbot"). Its anti-spam systems can restrict an account temporarily or permanently, and Telegram says it does not compensate for that. The risk is highest for new accounts and for messaging people who did not write first. The send cap and FloodWait handling lower the risk; they do not remove it.
+The bridge is a **third-party Telegram API application**, the same category as unofficial Telegram clients. It is not a bot account, and it does not pretend to be you without your knowledge. It logs in to your account with your own `api_id` and sends replies on your behalf, because you set it up to.
 
-- **No spam or outreach.** Never use the bridge for mass messaging, outreach, scams or anything the Telegram ToS forbids.
-- **Keep `write.allow` short.** List only people who already talk to you.
-- **Prefer a bot if it fits.** If you do not need your own identity, Hermes' built-in bot channel is the officially supported way.
+The API terms cover exactly this case. §1.4 forbids actions on behalf of the user *without the user's knowledge and consent*, so the bridge is allowed only because you know about it and agreed. The content-licensing terms let a legitimate third-party client use Telegram content only as far as strictly needed to run the service, and only while it fully complies with the ToS.
+
+What follows from this:
+
+- **You are the user, your contacts are not.** Your consent covers your account. It does not cover the people who write to you, which is why the AI section above asks for their consent.
+- **What the agent sends is yours.** The Telegram ToS (no spam, scams or illegal content) applies to every message as if you had typed it.
+- **Basic functionality stays intact (§1.3, §1.4).** Some of this is configurable:
+  - The bridge marks a message read only once the agent has taken it (`HERMES_TG_MARK_READ_ON_INBOUND`).
+  - It shows "typing…" only while the agent works (`HERMES_TG_TYPING_WHILE_REPLYING`).
+  - It never hides read receipts or fakes your online status.
+  - It never saves self-destructing media or media from chats with an auto-delete timer.
+- **Limits and bans still apply.** Telegram's anti-spam judges what an account does, not which app does it. Accounts get limited for flooding, and when recipients report messages as spam. The send cap and FloodWait handling lower that risk; they do not remove it.
+  - **No mass messaging or outreach.**
+  - **Do not write first** to people who have not written to you.
+  - **Keep `write.allow` short**: only people who already talk to you.
+- **Prefer a bot if it fits.** If the agent does not need to speak as you, Hermes' built-in bot channel is simpler and carries no risk to your personal account.
 
 ### Your contacts' privacy
 
-Messages from your contacts are their personal data. Depending on where you and they live, privacy law such as the GDPR may apply when you store those messages or send them to an AI provider. Telegram's API terms (§1.1) also require apps to protect user privacy and follow its [security guidelines](https://core.telegram.org/mtproto/security_guidelines).
+Messages from your contacts are their personal data. Depending on where you and they live, privacy law such as the GDPR may apply when you store those messages or send them to an AI provider. The bridge deletes downloaded media after `TELEGRAM_DM_MEDIA_RETENTION_DAYS` (7 by default). Message text the agent has seen, however, stays in Hermes' session history and with your model provider. Telegram's API terms (§1.1) also require apps to protect user privacy and follow its [security guidelines](https://core.telegram.org/mtproto/security_guidelines).
 
 ### Trademarks and affiliation
 

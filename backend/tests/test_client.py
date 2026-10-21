@@ -900,6 +900,25 @@ class TestBridgeClient(unittest.IsolatedAsyncioTestCase):
 
         self.mock_tg.download_media.assert_not_awaited()
 
+    async def test_self_destructing_media_is_never_downloaded(self) -> None:
+        bridge = self.create_bridge(
+            allow_chat_ids=["42"],
+            write_allow_chat_ids=["me", "42"],
+            media_download_root="/tmp/inbox",
+        )
+        self.mock_tg.get_entity.return_value = SimpleNamespace(id=42, username="allowed")
+        for tg_message in (
+            SimpleNamespace(id=83, media=SimpleNamespace(ttl_seconds=10)),
+            SimpleNamespace(id=83, media=SimpleNamespace(), ttl_period=86400),
+        ):
+            self.mock_tg.get_messages.return_value = tg_message
+
+            self.assertIsNone(await bridge.download_media_for_inbox("42", 83, output_path="/tmp/inbox/83.jpg"))
+            with self.assertRaises(BridgeForbiddenError):
+                await bridge.download_media("42", 83)
+
+        self.mock_tg.download_media.assert_not_awaited()
+
     async def test_download_media_for_inbox_returns_none_for_non_media_message(self) -> None:
         bridge = self.create_bridge(allow_chat_ids=["42"], media_download_root="/tmp/inbox")
         entity = SimpleNamespace(id=42, username="allowed")

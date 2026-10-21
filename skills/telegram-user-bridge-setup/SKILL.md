@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.1.0
+version: 1.2.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -55,7 +55,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/health
 
 Tell the user what you are about to do (an install in about 8 steps, roughly 10 minutes of their time). In the same message, give them these warnings (details: the README section "Legal and Telegram terms"):
 
-> "This is an unofficial project. Telegram can limit or ban an account that is automated or reported as spam. Its terms also require each person whose messages reach an AI to explicitly agree to that, so tell everyone you allow that an AI answers them, and get a clear yes first."
+> "This is an unofficial project. I will write on your behalf, from your account, so Telegram treats everything I send as yours and can limit or ban the account if people report it as spam. Telegram's terms also require each person whose messages reach an AI to explicitly agree to that, so tell everyone you allow that an AI answers them, and get a clear yes first."
 
 Ask whether to proceed. **Wait.**
 
