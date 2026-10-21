@@ -1,123 +1,209 @@
 # Hermes Telegram Bridge
 
-Это новый Hermes bridge для Telegram user account. Он не выполняет автоматическую миграцию из старой OpenClaw-сессии или state в `~/.openclaw`. Если вы переносите существующую сессию или state, задайте пути к ним явно через env `TELEGRAM_SESSION_PATH`, `TELEGRAM_POLICY_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_DM_MEDIA_PATH` и `TELEGRAM_LOCK_PATH`, а не рассчитывайте на автообнаружение.
+Let [Hermes Agent](https://github.com/NousResearch/hermes-agent) talk through your **own Telegram account**, not a bot. People you allow can DM you, and Hermes answers from your account, with read receipts and a typing indicator.
 
-## Что входит
-
-- `backend/` - HTTP backend на FastAPI и Telethon;
-- `plugin/hermes-telegram-user/` - Hermes platform plugin `telegram_user`;
-- `deploy/` - примеры systemd, policy и Hermes config;
-- `create_telethon_session.sh` - локальная авторизация Telegram user session.
-
-## Совместимость
-
-- Hermes Agent v0.22.x (проверено на v0.22.4); сам Hermes требует Python 3.11–3.14.
-- Backend: Python >= 3.10, Telethon 1.43.2–1.45.x.
-
-## Setup
-
-1. Создайте virtualenv для backend и установите зависимости из `backend/`.
-2. Сгенерируйте Telegram session локально через `python -m hermes_tg_bridge.auth` или `python -m hermes_tg_bridge.auth_qr`.
-3. Сохраните backend policy и config на сервисной машине, например по образцу из `deploy/`.
-4. Запустите backend как отдельный сервис.
-5. Подключите plugin `hermes-telegram-user` в Hermes и включите platform `telegram_user`.
-
-## Auth
-
-Авторизация Telegram user account выполняется локально один раз и сохраняет Telethon session в сервисный state directory.
-
-Безопасный вариант:
-
-```bash
-cd backend
-python3 -m hermes_tg_bridge.auth
+```
+Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_user"  ⇄  Hermes gateway
 ```
 
-QR-вариант:
+- **`backend/`**: an HTTP service built on FastAPI and Telethon. It owns the Telegram session and enforces the access policy: who may write to the agent and who the agent may write to.
+- **`plugin/hermes-telegram-user/`**: the Hermes platform plugin. It polls the backend for DMs and sends replies back.
+- **`skills/telegram-user-bridge-setup/`**: a Hermes skill that lets the agent install all of this for you over chat (see [Agent-assisted install](#agent-assisted-install)).
+- **`deploy/`**: example systemd unit, backend policy and Hermes config.
+- **`create_telethon_session.sh`**: an interactive login helper, if you prefer creating the session by hand.
+
+## Compatibility
+
+| Component | Supported |
+|---|---|
+| Hermes Agent | v0.22.x (tested on v0.22.4); Hermes itself needs Python 3.11–3.14 |
+| Backend | Python ≥ 3.10, Telethon 1.43.2–1.45.x |
+| OS | Linux with systemd for the documented deployment; the backend itself runs anywhere Python does |
+
+## Agent-assisted install
+
+If Hermes already runs on the target host and you reach it from a messaging app, it can do the setup for you. It walks you through the few steps only you can do: getting API credentials, scanning a QR code, entering your 2FA password, and restarting the gateway.
+
+1. Install the skill:
+   ```bash
+   hermes skills install https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md
+   ```
+2. In your chat with Hermes, send `/telegram-user-bridge-setup` (or "set up the Telegram user bridge").
+
+The agent needs the **local** terminal backend (commands must run on the Hermes host, not in a sandbox) and passwordless `sudo` for the system-service layout. Without passwordless `sudo` it asks you to run the few root commands yourself.
+
+## Manual install
+
+The steps below set up the hardened layout from `deploy/`:
+
+| Path | Owner / mode | Contents |
+|---|---|---|
+| `/opt/hermes-tg-bridge` | `root`, 0755 | code and virtualenv |
+| `/etc/hermes-tg-bridge` | `root:hermes-tg`, 0750 | `secret.env` (0640), `policy.json` (0640) |
+| `/var/lib/hermes-tg-bridge` | `hermes-tg`, 0700 | session, inbox cursors, lock |
+| `/var/lib/hermes-tg-bridge-media` | `hermes-tg:hermes-tg`, 2750 | downloaded inbound media (Hermes reads these) |
+
+The Telegram session is full access to your account. Keep it readable only by `hermes-tg`, never by the user that runs Hermes.
+
+### 1. Get Telegram API credentials
+
+Sign in at <https://my.telegram.org> → **API development tools** → create an app, then note the `api_id` and `api_hash`.
+
+### 2. Install the backend
 
 ```bash
-cd backend
-python3 -m hermes_tg_bridge.auth_qr
+sudo useradd --system --home-dir /var/lib/hermes-tg-bridge --shell /usr/sbin/nologin hermes-tg
+sudo git clone https://github.com/OstaninKI/Hermes_tg_bridge.git /opt/hermes-tg-bridge
+sudo python3 -m venv /opt/hermes-tg-bridge/backend/.venv
+sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install /opt/hermes-tg-bridge/backend
+sudo install -d -o hermes-tg -g hermes-tg -m 0700 /var/lib/hermes-tg-bridge
+sudo install -d -o hermes-tg -g hermes-tg -m 2750 /var/lib/hermes-tg-bridge-media
+sudo install -d -o root -g hermes-tg -m 0750 /etc/hermes-tg-bridge
 ```
 
-Если вы переносите старую OpenClaw session/state, укажите используемые paths явно через backend policy/config и systemd environment. Не полагайтесь на старые значения по умолчанию.
+### 3. Configure secrets and policy
 
-## Run backend
+Generate the bridge token, which is shared with the plugin:
 
-Пример systemd-сервиса: [deploy/hermes-tg-bridge.service](./deploy/hermes-tg-bridge.service)
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
 
-Проверьте, что backend слушает только `127.0.0.1` и требует API token. Для deployment используйте отдельного service user, отдельный state directory и явно заданный policy file.
+Create `/etc/hermes-tg-bridge/secret.env` (`root:hermes-tg`, mode 0640):
 
-## Plugin config
+```ini
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+TELEGRAM_BRIDGE_API_TOKEN=<generated token>
+```
 
-Платформа Hermes: `telegram_user`
+Copy [deploy/policy.json.example](deploy/policy.json.example) to `/etc/hermes-tg-bridge/policy.json` (`root:hermes-tg`, mode 0640). Under `profiles.dm_inbox`, list the Telegram ids or `@usernames` that may DM the agent (`read.allow`) and that the agent may reply to (`write.allow`). The backend rejects everyone else.
 
-Поддерживаемые env vars:
+### 4. Start the backend
 
-- `HERMES_TG_BRIDGE_URL`
-- `HERMES_TG_BRIDGE_API_TOKEN`
-- `HERMES_TG_POLICY_PROFILE`
-- `HERMES_TG_MARK_READ_ON_INBOUND`
-- `HERMES_TG_TYPING_WHILE_REPLYING`
-- `HERMES_TG_POLL_TIMEOUT_MS`
-- `HERMES_TG_POLL_INTERVAL_MS`
-- `HERMES_TG_HOME_CHANNEL` - чат для cron `deliver=telegram_user`
+```bash
+sudo cp /opt/hermes-tg-bridge/deploy/hermes-tg-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-tg-bridge
+curl -s http://127.0.0.1:8765/health
+```
 
-Приоритет конфигурации:
+Without a session yet, `/health` returns `{"status":"needs_reauth", ...}`. That is expected.
 
-1. env vars;
-2. `gateway.platforms.telegram_user.extra` в `config.yaml`.
+### 5. Log in to Telegram (QR)
 
-Пример: [deploy/config.yaml.example](./deploy/config.yaml.example)
+Log in by QR through the running backend. You need the QR on one screen and the Telegram app on your phone.
 
-## Cron delivery
+```bash
+TOKEN=<generated token>
+curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/auth/qr/start
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/auth/qr   # qr_ascii, qr_png_b64, qr_url
+```
 
-Cron-задачи Hermes с `deliver=telegram_user` отправляются в чат из `HERMES_TG_HOME_CHANNEL`
-(Telegram id или username) либо из `gateway.platforms.telegram_user.home_channel` в `config.yaml`.
-Если gateway не запущен в процессе cron, плагин шлёт напрямую через backend. Поддерживается
-только текст; получатель должен быть разрешён в backend `write_to`. Подробнее:
-[plugin README](./plugin/hermes-telegram-user/README.md#cron-delivery).
+1. On your phone, open **Telegram → Settings → Devices → Link Desktop Device** and scan the QR. It rotates about every 30 seconds; fetch `/auth/qr` again if it expired.
+2. Check progress with `GET /auth/qr/status`.
+3. If it reports `awaiting_password`, send your 2FA password:
+   ```bash
+   curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"password":"..."}' http://127.0.0.1:8765/auth/qr/2fa
+   ```
+4. When the status is `done`, `/health` returns `{"status":"ok","connected":true}`.
 
-## Safety defaults
+As an alternative, run `sudo -u hermes-tg sh /opt/hermes-tg-bridge/create_telethon_session.sh /var/lib/hermes-tg-bridge/hermes_user.session` for an interactive phone-and-code login. Then restart the service.
 
-- backend binds only to `127.0.0.1`;
-- при заданном `HERMES_TG_ALLOWED_USERS` Hermes не шлёт незнакомцам pairing-коды с личного аккаунта;
-- API token обязателен для deployed setup;
-- read/write allowlists задаются только в backend policy, а не в plugin config;
-- request-заголовки `X-Hermes-Allow-From` / `X-Hermes-Write-To` могут только **сузить** backend allowlist (пересечение), но не расширить его сверх policy;
-- исходящие отправки ограничены app-level rate-limit (`TELEGRAM_MAX_SENDS_PER_MIN`, default 25) поверх реактивной FloodWait-защиты;
-- `mark_read_on_inbound` включен только если это ожидаемое поведение;
-- Telegram session/state хранится в выделенной service-owned директории;
-- policy должен явно ограничивать read/write peers.
+### 6. Install the Hermes plugin
 
-## Backend tuning env
+Run these as the user that runs Hermes:
 
-Все опциональны, с безопасными дефолтами. Задаются в systemd `EnvironmentFile`/`Environment`.
+```bash
+sudo usermod -aG hermes-tg "$(id -un)"     # read inbound media; takes effect on next login/restart
+cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user ~/.hermes/plugins/
+hermes plugins enable hermes-telegram-user
+```
 
-- `TELEGRAM_MAX_SENDS_PER_MIN` - жёсткий предел исходящих отправок в минуту на процесс, default `25` (предохранитель от runaway-агента). Длинное сообщение, которое режется на N частей, списывает N единиц лимита;
-- `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` - до скольких секунд FloodWait backend ждёт и ретраит сам, прежде чем вернуть `429 Retry-After`, default `30`;
-- `TELEGRAM_REPLY_DELAY_SEC` - пауза перед исходящей отправкой, default `2`. Явный `0` теперь уважается;
-- `TELEGRAM_IDEMPOTENCY_TTL_SEC` - TTL кэша идемпотентности отправок, default `600`;
-- `TELEGRAM_IDEMPOTENCY_MAX_KEYS` - размер кэша идемпотентности, default `1000`;
-- `TELEGRAM_DM_INBOX_BACKFILL` - что делать с сообщениями, пришедшими до первого старта: `unread` (default) - обработать непрочитанные, `none` - только новые, `all` - проиграть недавнюю историю;
-- `TELEGRAM_DM_MEDIA_RETENTION_DAYS` - через сколько дней удалять скачанные входящие вложения, default `7`, `0` отключает уборку;
-- `HERMES_QR_PASSWORD_TIMEOUT` - таймаут ожидания 2FA-пароля в QR-авторизации, секунды, default `180`;
-- `TELEGRAM_DISABLE_EXTENDED_API=1` - оставить только endpoints, нужные Hermes gateway (`/health`, `/me`, `/send_message`, `/dm/*`, `/auth/qr/*`); все остальные отдают `404`.
+Add to `~/.hermes/.env`:
 
-### Первый запуск и старые сообщения
+```ini
+HERMES_TG_BRIDGE_API_TOKEN=<generated token>
+HERMES_TG_ALLOWED_USERS=123456789,@friend
+# optional: where cron jobs with deliver=telegram_user go
+HERMES_TG_HOME_CHANNEL=123456789
+```
 
-При первом обращении к `/dm/inbox/poll` для каждого разрешённого отправителя backend
-берёт стартовую позицию курсора из состояния прочтения самого Telegram. По умолчанию
-(`TELEGRAM_DM_INBOX_BACKFILL=unread`) агент получит ровно то, что осталось непрочитанным,
-а не всю недавнюю переписку. Позиция сохраняется в `dm_inbox_state.json`, поэтому
-подбор выполняется один раз на отправителя.
+### 7. Restart Hermes and test
+
+```bash
+hermes gateway restart
+hermes gateway status
+```
+
+Have an allowed contact DM your account; Hermes should answer from it. Messages to yourself ("Saved Messages") are not DMs and are ignored.
+
+## Configuration
+
+### Plugin (Hermes side)
+
+Environment variables override `gateway.platforms.telegram_user.extra` in Hermes `config.yaml` (see [deploy/config.yaml.example](deploy/config.yaml.example)).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HERMES_TG_BRIDGE_API_TOKEN` | — (required) | Bearer token, same as the backend's `TELEGRAM_BRIDGE_API_TOKEN` |
+| `HERMES_TG_BRIDGE_URL` | `http://127.0.0.1:8765` | Backend URL |
+| `HERMES_TG_POLICY_PROFILE` | `dm_inbox` | Backend policy profile |
+| `HERMES_TG_ALLOWED_USERS` | — | Comma-separated ids/usernames Hermes accepts (also Hermes' own user allowlist) |
+| `HERMES_TG_ALLOW_ALL_USERS` | `false` | Accept every sender the backend lets through (dev only) |
+| `HERMES_TG_HOME_CHANNEL` | — | Chat for cron `deliver=telegram_user` |
+| `HERMES_TG_MARK_READ_ON_INBOUND` | `true` | Mark DMs read once Hermes accepts them |
+| `HERMES_TG_TYPING_WHILE_REPLYING` | `true` | Show "typing…" while Hermes works |
+| `HERMES_TG_POLL_TIMEOUT_MS` | `25000` | Long-poll timeout |
+| `HERMES_TG_POLL_INTERVAL_MS` | `1500` | Pause between polls |
+
+### Cron delivery
+
+Hermes cron jobs with `deliver=telegram_user` go to `HERMES_TG_HOME_CHANNEL`, or to `gateway.platforms.telegram_user.home_channel` in `config.yaml`. If no gateway runs in the cron process, the plugin sends directly through the backend. Only text is supported, and the recipient must be in the backend `write.allow` list. Details are in the [plugin README](plugin/hermes-telegram-user/README.md#cron-delivery).
+
+### Backend tuning
+
+All optional; set them in the systemd unit or `secret.env`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TELEGRAM_MAX_SENDS_PER_MIN` | `25` | Hard cap on outgoing sends per process (runaway-agent fuse); a message split into N parts costs N |
+| `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` | `30` | Longest FloodWait the backend sleeps through before returning `429 Retry-After` |
+| `TELEGRAM_REPLY_DELAY_SEC` | `2` | Pause before each outgoing send; `0` is honoured |
+| `TELEGRAM_IDEMPOTENCY_TTL_SEC` | `600` | Lifetime of the send idempotency cache |
+| `TELEGRAM_IDEMPOTENCY_MAX_KEYS` | `1000` | Size of the send idempotency cache |
+| `TELEGRAM_DM_INBOX_BACKFILL` | `unread` | Messages from before the first start: `unread`, `none` (only new), `all` (recent history) |
+| `TELEGRAM_DM_MEDIA_RETENTION_DAYS` | `7` | Delete downloaded inbound media after N days; `0` disables cleanup |
+| `HERMES_QR_PASSWORD_TIMEOUT` | `180` | Seconds the QR login waits for the 2FA password |
+| `TELEGRAM_DISABLE_EXTENDED_API` | off | `1` keeps only the endpoints the gateway needs (`/health`, `/me`, `/send_message`, `/dm/*`, `/auth/qr/*`); the rest return `404` |
+| `TELEGRAM_PROXY_TYPE` / `_HOST` / `_PORT` / `_SECRET` | — | `socks5` or `mtproxy` connection to Telegram |
+
+State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/telethon` if that is unset. Override them with `TELEGRAM_SESSION_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_DM_MEDIA_PATH` and `TELEGRAM_LOCK_PATH`, as the example unit does.
+
+## Safety
+
+- **Network:** the backend binds to `127.0.0.1` only and requires the bearer token. Running without one needs an explicit `TELEGRAM_BRIDGE_ALLOW_NO_TOKEN=1`.
+- **Access policy:**
+  - Read and write allowlists live in the backend policy. The plugin's `X-Hermes-Allow-From` / `X-Hermes-Write-To` headers can only **narrow** them (intersection), never widen them.
+  - With `HERMES_TG_ALLOWED_USERS` set, Hermes never sends pairing codes to strangers from your personal account.
+- **Send limits:** an app-level rate limit (`TELEGRAM_MAX_SENDS_PER_MIN`) sits on top of FloodWait handling.
+- **Session:** the Telegram session is stored in a directory only the backend's service user can read.
+
+### First start and old messages
+
+On the first `/dm/inbox/poll` for each allowed sender, the backend starts from Telegram's own read state. With the default `TELEGRAM_DM_INBOX_BACKFILL=unread`, the agent sees what is still unread, not the whole recent history. The position is stored in `dm_inbox_state.json`, so this happens once per sender.
 
 ### Idempotency
 
-Send-эндпоинты (`send_message`, `send_file`, `send_voice`, `send_sticker`, `send_location`) принимают опциональный заголовок `Idempotency-Key`. Повторный запрос с тем же ключом в пределах TTL возвращает закэшированный ответ и не шлёт сообщение в Telegram повторно. Кэш in-memory per-process (теряется при рестарте; при мультиинстансе нужен shared store).
+Send endpoints (`send_message`, `send_file`, `send_voice`, `send_sticker`, `send_location`) accept an optional `Idempotency-Key` header. A repeat with the same key within the TTL returns the cached response instead of sending again. The cache is in-memory and per process: it is lost on restart, and multiple instances would need a shared store.
 
 ## Extended API
 
-Backend реализует дополнительные операции Telegram, выходящие за пределы scope gateway (отправка файлов/голоса/стикеров/локации, редактирование/удаление/пересылка сообщений, чтение истории и диалогов, управление контактами, группами, каналами и правами). Все эти endpoints защищены Bearer auth и backend policy; привилегированные операции дополнительно требуют, чтобы write-scope включал `me` или `*`, поэтому при обычной DM-policy они отдают `403`.
+Beyond the gateway's needs, the backend implements more Telegram operations:
+- files, voice, stickers and locations;
+- editing, deleting and forwarding messages;
+- reading history and dialogs;
+- managing contacts, groups, channels and permissions.
 
-Это реализованные, но не входящие в core gateway scope операции, указанные в spec как "Deferred Work". `TELEGRAM_DISABLE_EXTENDED_API=1` убирает их все разом: список разрешённого задан явным перечнем core-путей, поэтому любой новый endpoint по умолчанию попадает под запрет, а не мимо него.
+All of them sit behind bearer auth and the backend policy. Privileged operations also need a write scope that includes `me` or `*`, so a normal DM policy gets `403`. `TELEGRAM_DISABLE_EXTENDED_API=1` turns them all off. The allowed set is an explicit list of core paths, so any new endpoint is blocked by default.

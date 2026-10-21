@@ -5,13 +5,24 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=hermes
-Group=hermes
+# Dedicated account: the user that runs Hermes must NOT be able to read the
+# Telegram session. Hermes only joins the hermes-tg group to read inbound media.
+User=hermes-tg
+Group=hermes-tg
+# Files the backend creates are group-readable (media), never world-readable.
+UMask=0027
 WorkingDirectory=/opt/hermes-tg-bridge/backend
 Environment=PYTHONUNBUFFERED=1
-# Load secret token from file (must be mode 0600 with TELEGRAM_BRIDGE_API_TOKEN=...)
-EnvironmentFile=-/etc/hermes-tg-bridge/secret.env
+# TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BRIDGE_API_TOKEN (root:hermes-tg, mode 0640)
+EnvironmentFile=/etc/hermes-tg-bridge/secret.env
 Environment=TELEGRAM_POLICY_PATH=/etc/hermes-tg-bridge/policy.json
+# Private state (mode 0700): session, inbox cursors, lock
+Environment=TELEGRAM_SESSION_PATH=/var/lib/hermes-tg-bridge/hermes_user.session
+Environment=TELEGRAM_INBOX_STATE_PATH=/var/lib/hermes-tg-bridge/dm_inbox_state.json
+Environment=TELEGRAM_SOURCES_INVENTORY_PATH=/var/lib/hermes-tg-bridge/sources_inventory.json
+Environment=TELEGRAM_LOCK_PATH=/var/lib/hermes-tg-bridge/bridge.lock
+# Inbound media (mode 2750, group hermes-tg): Hermes reads files from here
+Environment=TELEGRAM_DM_MEDIA_PATH=/var/lib/hermes-tg-bridge-media
 # Optional tuning (defaults shown; uncomment to override):
 # Environment=TELEGRAM_MAX_SENDS_PER_MIN=25
 # Environment=TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC=30
@@ -47,7 +58,7 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/var/lib/hermes-tg-bridge /etc/hermes-tg-bridge
+ReadWritePaths=/var/lib/hermes-tg-bridge /var/lib/hermes-tg-bridge-media
 DynamicUser=false
 
 [Install]

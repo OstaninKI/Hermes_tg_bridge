@@ -2,81 +2,57 @@
 
 Platform name: `telegram_user`
 
-Этот plugin подключает Hermes к живому Telegram user account через backend `hermes-tg-bridge`.
+Connects Hermes to a live Telegram user account through the `hermes-tg-bridge` backend. Install and deployment are covered in the [main README](../../README.md).
 
 ## Requirements
 
-- запущенный backend `hermes-tg-bridge`;
-- доступ к backend URL, по умолчанию `http://127.0.0.1:8765`;
-- API token, совпадающий с backend token;
-- Telegram user session уже создан локально на стороне backend.
+- a running `hermes-tg-bridge` backend with an authorized Telegram session;
+- network access to the backend URL, by default `http://127.0.0.1:8765`;
+- the backend's API token;
+- read access to the backend's inbound media directory (in the reference layout, the Hermes user joins the `hermes-tg` group).
 
 ## Environment variables
 
-- `HERMES_TG_BRIDGE_URL` - URL backend, default `http://127.0.0.1:8765`;
-- `HERMES_TG_BRIDGE_API_TOKEN` - bearer token для backend;
-- `HERMES_TG_POLICY_PROFILE` - policy profile, default `dm_inbox`;
-- `HERMES_TG_ALLOWED_USERS` - список Telegram id/username через запятую;
-- `HERMES_TG_ALLOW_ALL_USERS` - `true`/`false`, default `false`;
-- `HERMES_TG_MARK_READ_ON_INBOUND` - `true`/`false`, default `true`;
-- `HERMES_TG_TYPING_WHILE_REPLYING` - `true`/`false`, default `true`;
-- `HERMES_TG_POLL_TIMEOUT_MS` - default `25000`;
-- `HERMES_TG_POLL_INTERVAL_MS` - default `1500`;
-- `HERMES_TG_HOME_CHANNEL` - Telegram id/username для cron-доставки `deliver=telegram_user`.
+- `HERMES_TG_BRIDGE_URL`: backend URL, default `http://127.0.0.1:8765`;
+- `HERMES_TG_BRIDGE_API_TOKEN`: bearer token for the backend (required);
+- `HERMES_TG_POLICY_PROFILE`: backend policy profile, default `dm_inbox`;
+- `HERMES_TG_ALLOWED_USERS`: comma-separated Telegram ids/usernames allowed to reach the agent;
+- `HERMES_TG_ALLOW_ALL_USERS`: `true`/`false`, default `false`;
+- `HERMES_TG_HOME_CHANNEL`: Telegram id/username for cron `deliver=telegram_user`;
+- `HERMES_TG_MARK_READ_ON_INBOUND`: `true`/`false`, default `true`;
+- `HERMES_TG_TYPING_WHILE_REPLYING`: `true`/`false`, default `true`;
+- `HERMES_TG_POLL_TIMEOUT_MS`: default `25000`;
+- `HERMES_TG_POLL_INTERVAL_MS`: default `1500`.
 
-`gateway.platforms.telegram_user.extra` can provide the same settings as fallback values, but env vars win.
+`gateway.platforms.telegram_user.extra` in `config.yaml` can provide the same settings as fallbacks; env vars win.
 
-`HERMES_TG_ALLOWED_USERS` / `HERMES_TG_ALLOW_ALL_USERS` дополнительно зарегистрированы
-как `allowed_users_env` / `allow_all_env`, поэтому Hermes применяет к ним свою штатную
-проверку авторизации пользователя, а не только фильтр внутри адаптера. Платформа
-зарегистрирована с `allowlist_suppresses_pairing=True`: при заданном allowlist Hermes не
-отправляет незнакомцам pairing-код с личного аккаунта владельца.
+`HERMES_TG_ALLOWED_USERS` and `HERMES_TG_ALLOW_ALL_USERS` are also registered as the platform's `allowed_users_env` / `allow_all_env`. Hermes applies its own user authorization to them, on top of the adapter's filter. The platform is registered with `allowlist_suppresses_pairing=True`, so when an allowlist is set, Hermes never sends a pairing code to a stranger from the owner's personal account.
 
 ## Cron delivery
 
-Задайте `HERMES_TG_HOME_CHANNEL`, и cron-задачи с `deliver=telegram_user` уйдут в этот
-чат. Если gateway не запущен в том же процессе (`hermes cron`), плагин отправляет напрямую
-через backend (`standalone_sender_fn`) с тем же токеном и policy-заголовками. Пока только
-текст: вложения в standalone-режиме возвращают ошибку, а не теряются молча. Получатель
-должен быть разрешён в backend `write_to`.
+Set `HERMES_TG_HOME_CHANNEL`, and cron jobs with `deliver=telegram_user` go to that chat.
+
+When no gateway runs in the same process (`hermes cron`), the plugin sends directly through the backend (`standalone_sender_fn`), with the same token and policy headers. Only text is supported for now: attachments in standalone mode return an error instead of being dropped silently. The recipient must be allowed by the backend's `write.allow`.
 
 ## Installation / discovery
 
-Hermes находит directory-based плагин по манифесту `plugin.yaml` и импортирует директорию
-как пакет `hermes_plugins.<slug>`, вызывая `register(ctx)` из `__init__.py`. Разместите
-директорию плагина в `~/.hermes/plugins/hermes-telegram-user/` (или `./.hermes/plugins/`),
-сохранив `plugin.yaml`, `__init__.py` и `adapter.py`.
+Hermes discovers a directory plugin by its `plugin.yaml` manifest. It imports the directory as the package `hermes_plugins.<slug>` and calls `register(ctx)` from `__init__.py`.
 
-Импорт внутри `__init__.py` обязан быть относительным (`from .adapter import register`) —
-абсолютный `from adapter import ...` не резолвится из пакетного контекста, которым Hermes
-загружает плагин.
+1. Copy this directory to `~/.hermes/plugins/hermes-telegram-user/` (or `./.hermes/plugins/`), keeping `plugin.yaml`, `__init__.py` and `adapter.py`.
+2. Run `hermes plugins enable hermes-telegram-user`.
+
+The import in `__init__.py` must stay relative (`from .adapter import register`). An absolute `from adapter import ...` does not resolve from the package context Hermes loads the plugin in.
 
 ## Behaviour notes
 
-- **Медиа.** Backend скачивает вложения; адаптер перекладывает их байты в media-кэш Hermes
-  через `cache_media_bytes` и проставляет `media_urls`/`media_types`, чтобы файл был виден
-  агенту (в т.ч. vision-инструментам). Файлы больше 100 МБ пропускаются с записью в лог.
-- **Сбойные сообщения.** Если Hermes не принял сообщение (`handle_message` упал), оно
-  повторяется до 10 раз; после этого оно ack-ается принудительно, чтобы очередь не встала. Отфильтрованные по `allow_from` события тоже
-  ack-аются — иначе backend отдавал бы их на каждом опросе бесконечно.
-- **Дубликаты при отправке.** Каждый `send()` уходит с `Idempotency-Key`, стабильным для
-  повторов одного и того же сообщения в пределах 120 секунд, поэтому ретрай после
-  клиентского таймаута не приводит ко второй доставке в Telegram.
-- **Ошибки отправки.** `SendResult` возвращает `retryable`, `retry_after` и `error_kind`,
-  так что база Hermes сама решает, повторять ли попытку и как долго ждать.
+- **Media.** The backend downloads attachments. The adapter copies their bytes into Hermes' media cache through `cache_media_bytes` and sets `media_urls`/`media_types`, so the file is visible to the agent, including vision tools. Files over 100 MB are skipped and logged.
+- **Failing messages.** If Hermes does not accept a message (`handle_message` raises), it is retried up to 10 times, then acknowledged anyway so the queue keeps moving. Events filtered out by `allow_from` are acknowledged too; otherwise the backend would return them on every poll forever.
+- **Duplicate sends.** Every `send()` carries an `Idempotency-Key` that is stable across retries of the same message within 120 seconds, so a retry after a client timeout never delivers twice.
+- **Send errors.** `SendResult` carries `retryable`, `retry_after` and `error_kind`, so Hermes decides whether to retry and how long to wait.
 
-## Notes
+## Development
 
-The plugin is intentionally small. It implements Hermes' `BasePlatformAdapter` plugin contract, polls the backend for inbound DMs, forwards accepted messages into Hermes as `MessageEvent` values, and sends replies back through the backend as `SendResult` values.
+Run the tests from the `plugin/` directory:
 
-Read/write enforcement stays in the backend policy layer; peer allowlists must be configured there, not through plugin request headers. Each inbound DM uses the Telegram sender id as both Hermes `chat_id` and `user_id`, so separate Telegram accounts map to separate Hermes chat sessions.
-
-## Tests
-
-```bash
-python3 -m pytest plugin/tests -q
-```
-
-Тесты лежат вне директории плагина и загружают его ровно так же, как Hermes
-(`spec_from_file_location` + `submodule_search_locations`), поэтому ошибки импорта
-пакета ловятся тестами, а не только на живом запуске.
+- `python -m pytest`: runs against a small shim of the Hermes gateway API.
+- `PYTHONPATH=<hermes-agent checkout> python -m pytest`: runs the same suite against the real gateway; the Hermes checkout's dependencies must be installed.
