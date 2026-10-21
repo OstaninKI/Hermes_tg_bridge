@@ -3,3 +3,11 @@ backend/.venv/
 *.egg-info/
 __pycache__/
 .pytest_cache/
+
+# secrets and Telegram state: never commit
+*.session
+*.session-journal
+.env
+*.env
+policy.json
+dm_inbox_state.json
