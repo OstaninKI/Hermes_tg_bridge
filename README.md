@@ -10,15 +10,22 @@
 
 Let [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research) talk through your **own Telegram account**, not a bot. People you allow can DM you, and Hermes answers from your account, with read receipts and a typing indicator.
 
-Hermes' built-in Telegram channel needs a bot made with @BotFather, so people have to find and start that bot. This project adds a second channel, `telegram_user`, that logs in as **you** over MTProto ([Telethon](https://github.com/LonamiWebs/Telethon)). Contacts write to you as usual, and the AI assistant replies in the same chat.
+Hermes' built-in Telegram channel needs a bot made with @BotFather, so people have to find and start that bot. This project adds a second channel, `telegram_user`, that logs in as **you** over MTProto ([Telethon](https://codeberg.org/Lonami/Telethon)). Contacts write to you as usual, and the AI assistant replies in the same chat.
 
 **Use it for:** a personal AI assistant that answers your DMs, an auto-reply agent for a small set of contacts, or cron reports that arrive from your own account instead of a bot.
+
+> [!WARNING]
+> **Unofficial project, use at your own risk.** It is not affiliated with or endorsed by Telegram or Nous Research.
+> - Telegram can limit or **ban an account** that is automated or reported as spam, and it gives no compensation.
+> - Under Telegram's terms, passing your contacts' messages to an AI model needs **their explicit consent**. Tell everyone you allowlist that an AI answers them.
+>
+> Read [Legal and Telegram terms](#legal-and-telegram-terms) before installing.
 
 ## Features
 
 - **Native Hermes platform plugin**, not a wrapper script. DMs show up in the Hermes gateway like any other channel, sessions and memory included.
 - **Allowlists both ways**: who may write to the agent and who the agent may write to. Enforced in the backend, so the agent cannot widen them.
-- **Looks human**: marks messages read, shows "typing…", waits a bit before sending.
+- **Behaves like a normal client**: marks messages read, shows "typing…", waits a bit before sending. It never hides read receipts or fakes your online status.
 - **Ban-safety fuses**: a per-minute send cap and FloodWait handling, so a runaway agent cannot spam from your account.
 - **Hardened deployment**: the Telegram session lives under a separate system user; the backend listens on `127.0.0.1` only, behind a bearer token.
 - **QR login** with 2FA, no phone code to type into a server.
@@ -88,6 +95,8 @@ The Telegram session is full access to your account. Keep it readable only by `h
 ### 1. Get Telegram API credentials
 
 Sign in at <https://my.telegram.org> → **API development tools** → create an app, then note the `api_id` and `api_hash`.
+
+Use your own `api_id`; never borrow one. Telegram's API terms forbid the word "Telegram" in the app title unless it is preceded by "Unofficial", so pick a name like `Hermes bridge`.
 
 ### 2. Install the backend
 
@@ -229,6 +238,53 @@ State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/te
   - With `HERMES_TG_ALLOWED_USERS` set, Hermes never sends pairing codes to strangers from your personal account.
 - **Send limits:** an app-level rate limit (`TELEGRAM_MAX_SENDS_PER_MIN`) sits on top of FloodWait handling.
 - **Session:** the Telegram session is stored in a directory only the backend's service user can read.
+
+## Legal and Telegram terms
+
+This is not legal advice. You run the bridge on your own account, with your own `api_id`, so you are the one bound by Telegram's terms and responsible for what the agent sends. Last checked against Telegram's terms on 2026-10-22. Telegram changes them, so read the originals:
+- [Terms of Service](https://telegram.org/tos)
+- [API Terms of Service](https://core.telegram.org/api/terms)
+- [Content Licensing and AI Scraping](https://telegram.org/tos/content-licensing)
+
+### AI and your contacts' messages
+
+API terms §1.5 and the content-licensing terms forbid using Telegram data to train, fine-tune or **deploy** AI models. The one exception is explicit, informed, affirmative and continued consent from the users concerned, given per chat. An agent that reads DMs and answers them with an LLM comes under this. In practice:
+
+- **Get consent first.** Before you add someone to `read.allow`, tell them an AI answers in this chat and that their messages go to your model provider, and get a clear yes. Remove them when they withdraw it.
+- **Stay in consented DMs.** Do not point the bridge at groups or channels, where you cannot get consent from everyone.
+- **Do not train on chats.** Never use chat logs to train or fine-tune a model.
+- **Check your model provider.** The provider you configure in Hermes has its own terms and data retention. A local model keeps messages on your machine.
+
+The allowlist-only design exists to make this workable: the agent only ever sees chats you chose.
+
+### Account automation and bans
+
+Telegram's terms do not explicitly allow automating a user account (a "userbot"). Its anti-spam systems can restrict an account temporarily or permanently, and Telegram says it does not compensate for that. The risk is highest for new accounts and for messaging people who did not write first. The send cap and FloodWait handling lower the risk; they do not remove it.
+
+- **No spam or outreach.** Never use the bridge for mass messaging, outreach, scams or anything the Telegram ToS forbids.
+- **Keep `write.allow` short.** List only people who already talk to you.
+- **Prefer a bot if it fits.** If you do not need your own identity, Hermes' built-in bot channel is the officially supported way.
+
+### Your contacts' privacy
+
+Messages from your contacts are their personal data. Depending on where you and they live, privacy law such as the GDPR may apply when you store those messages or send them to an AI provider. Telegram's API terms (§1.1) also require apps to protect user privacy and follow its [security guidelines](https://core.telegram.org/mtproto/security_guidelines).
+
+### Trademarks and affiliation
+
+Telegram is a trademark of Telegram FZ-LLC. Hermes Agent is a project of Nous Research. This project is independent of both and uses neither logo. "Telegram" in its name only describes what it connects to.
+
+### License and third-party software
+
+This project is [MIT-licensed](LICENSE) and provided "as is", without warranty. Its dependencies are installed from PyPI rather than bundled, and they keep their own licenses:
+
+| Package | License | Source |
+|---|---|---|
+| Telethon | MIT | [codeberg.org/Lonami/Telethon](https://codeberg.org/Lonami/Telethon) (moved from GitHub, which is archived) |
+| FastAPI, Pydantic | MIT | PyPI |
+| Starlette, Uvicorn, httpx | BSD-3-Clause | PyPI |
+| qrcode | BSD | PyPI |
+| Pillow | MIT-CMU | PyPI |
+| Hermes Agent (not a dependency; the plugin runs inside it) | MIT | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
 
 ### First start and old messages
 

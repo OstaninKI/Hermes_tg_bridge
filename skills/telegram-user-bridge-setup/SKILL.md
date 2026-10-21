@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.0.0
+version: 1.1.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -53,11 +53,15 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/health
 
 **If `SUDO_NO`:** every block marked *(root)* below goes into one file, `/tmp/hermes-tg-bridge-root.sh`, instead of being run directly. Build that file progressively, with any secrets read from files, never inlined. Show the user its full contents and ask them to run `sudo sh /tmp/hermes-tg-bridge-root.sh` over SSH and reply "done". Then verify the result yourself before continuing.
 
-Tell the user what you are about to do (an install in about 8 steps, roughly 10 minutes of their time), and ask whether to proceed. **Wait.**
+Tell the user what you are about to do (an install in about 8 steps, roughly 10 minutes of their time). In the same message, give them these warnings (details: the README section "Legal and Telegram terms"):
+
+> "This is an unofficial project. Telegram can limit or ban an account that is automated or reported as spam. Its terms also require each person whose messages reach an AI to explicitly agree to that, so tell everyone you allow that an AI answers them, and get a clear yes first."
+
+Ask whether to proceed. **Wait.**
 
 ## Step 1. Allowed contacts (ask)
 
-> "Who should be able to talk to me through your Telegram account? Send their Telegram @usernames or numeric ids, comma-separated. Only these people will reach me; everyone else is ignored. (You cannot test by writing to yourself: Saved Messages are not DMs.)"
+> "Who should be able to talk to me through your Telegram account? Send their Telegram @usernames or numeric ids, comma-separated. Only these people will reach me; everyone else is ignored. List only people who have agreed that an AI answers them. (You cannot test by writing to yourself: Saved Messages are not DMs.)"
 
 **Wait.** Normalize the answer:
 - Numeric ids stay as they are.
@@ -74,7 +78,7 @@ Remember the answer as `HOME_CHANNEL`.
 
 ## Step 2. Telegram API credentials (user action)
 
-> "Open https://my.telegram.org, sign in with your phone number, go to **API development tools** and create an app (any name and short name; platform 'Other'). You'll get an **api_id** (a number) and an **api_hash** (32 hex characters).
+> "Open https://my.telegram.org, sign in with your phone number, go to **API development tools** and create an app (platform 'Other'; any name and short name, but no word 'Telegram' in them, e.g. 'Hermes bridge'). You'll get an **api_id** (a number) and an **api_hash** (32 hex characters).
 >
 > You can send them to me here, but they will stay in my chat history on this server. If you'd rather not, put them on this server yourself:
 > `sudo install -m 600 /dev/null /tmp/tg-api && sudo nano /tmp/tg-api` with two lines, `TELEGRAM_API_ID=...` and `TELEGRAM_API_HASH=...`, then reply 'file'."
