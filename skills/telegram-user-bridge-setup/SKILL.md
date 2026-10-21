@@ -47,7 +47,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/health
 ```
 
 - **Not Linux, no systemd, or `hermes` not found in the terminal** (a sandboxed terminal backend): stop. Tell the user this skill needs the local terminal on a Linux/systemd host and point them to the manual install in the repository README.
-- **Python older than 3.10:** stop and say so.
+- **Python older than 3.11:** stop and say so.
 - **Port 8765 already answers:** a bridge may already be installed. Ask the user whether to reuse it (skip to step 5 or 7) or stop.
 - **Remember:** `HERMES_USER=$(id -un)`, the Hermes home, and whether you have `SUDO_OK`.
 

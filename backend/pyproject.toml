@@ -7,7 +7,7 @@ name = "hermes-tg-bridge"
 version = "0.1.0"
 description = "Telethon HTTP bridge for Hermes Agent (live Telegram user account)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
     "telethon>=1.43.2,<1.46",
