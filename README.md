@@ -1,5 +1,13 @@
 # Hermes Telegram Bridge
 
+> **AI agent asked to install this?** Don't improvise from this README. Read and follow the setup skill step by step:
+> <https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md>
+>
+> - **Hermes:** install it with `hermes skills install <that URL>`, then load the skill `telegram-user-bridge-setup`.
+> - **Other agents:** fetch the file and follow it as instructions.
+>
+> It tells you what to run, what to ask the user and when to wait for them.
+
 Let [Hermes Agent](https://github.com/NousResearch/hermes-agent) talk through your **own Telegram account**, not a bot. People you allow can DM you, and Hermes answers from your account, with read receipts and a typing indicator.
 
 ```
@@ -24,11 +32,17 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 
 If Hermes already runs on the target host and you reach it from a messaging app, it can do the setup for you. It walks you through the few steps only you can do: getting API credentials, scanning a QR code, entering your 2FA password, and restarting the gateway.
 
-1. Install the skill:
-   ```bash
-   hermes skills install https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md
-   ```
-2. In your chat with Hermes, send `/telegram-user-bridge-setup` (or "set up the Telegram user bridge").
+The simplest way is to send Hermes this message:
+
+> Install https://github.com/OstaninKI/Hermes_tg_bridge so you can talk through my Telegram account.
+
+Hermes reads this README, finds the skill and follows it. To install the skill yourself instead:
+
+```bash
+hermes skills install https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md
+```
+
+Then send `/telegram-user-bridge-setup` in your chat with Hermes.
 
 The agent needs the **local** terminal backend (commands must run on the Hermes host, not in a sandbox) and passwordless `sudo` for the system-service layout. Without passwordless `sudo` it asks you to run the few root commands yourself.
 
