@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly: catch new CVEs in dependencies without a commit
 
 permissions:
   contents: read
@@ -12,15 +14,27 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.11", "3.14"]
+        include:
+          # oldest Python with the oldest versions pyproject allows: keeps the lower bounds honest
+          - python: "3.11"
+            resolution: lowest-direct
+          - python: "3.14"
+            resolution: highest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install ./backend[dev]
+          activate-environment: "true"
+          enable-cache: "false"
+      - run: uv pip compile pyproject.toml --extra dev --resolution ${{ matrix.resolution }} -o "$RUNNER_TEMP/requirements.txt"
+      - run: uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off
+      - run: uv pip install -r "$RUNNER_TEMP/requirements.txt" && uv pip install --no-deps .
       - run: python -m pytest -q
-        working-directory: backend
