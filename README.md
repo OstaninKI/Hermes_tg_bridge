@@ -1,4 +1,4 @@
-# Hermes Telegram Bridge
+# Hermes Telegram Bridge: Hermes Agent on your personal Telegram account (userbot, not a bot)
 
 > **AI agent asked to install this?** Don't improvise from this README. Read and follow the setup skill step by step:
 > <https://raw.githubusercontent.com/OstaninKI/Hermes_tg_bridge/main/skills/telegram-user-bridge-setup/SKILL.md>
@@ -8,7 +8,33 @@
 >
 > It tells you what to run, what to ask the user and when to wait for them.
 
-Let [Hermes Agent](https://github.com/NousResearch/hermes-agent) talk through your **own Telegram account**, not a bot. People you allow can DM you, and Hermes answers from your account, with read receipts and a typing indicator.
+Let [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research) talk through your **own Telegram account**, not a bot. People you allow can DM you, and Hermes answers from your account, with read receipts and a typing indicator.
+
+Hermes' built-in Telegram channel needs a bot made with @BotFather, so people have to find and start that bot. This project adds a second channel, `telegram_user`, that logs in as **you** over MTProto ([Telethon](https://github.com/LonamiWebs/Telethon)). Contacts write to you as usual, and the AI assistant replies in the same chat.
+
+**Use it for:** a personal AI assistant that answers your DMs, an auto-reply agent for a small set of contacts, or cron reports that arrive from your own account instead of a bot.
+
+## Features
+
+- **Native Hermes platform plugin**, not a wrapper script. DMs show up in the Hermes gateway like any other channel, sessions and memory included.
+- **Allowlists both ways**: who may write to the agent and who the agent may write to. Enforced in the backend, so the agent cannot widen them.
+- **Looks human**: marks messages read, shows "typing…", waits a bit before sending.
+- **Ban-safety fuses**: a per-minute send cap and FloodWait handling, so a runaway agent cannot spam from your account.
+- **Hardened deployment**: the Telegram session lives under a separate system user; the backend listens on `127.0.0.1` only, behind a bearer token.
+- **QR login** with 2FA, no phone code to type into a server.
+- **Inbound media**: photos, voice and files are downloaded for Hermes to read.
+- **Cron delivery**: Hermes scheduled jobs with `deliver=telegram_user` arrive from your account.
+- **Self-install**: a Hermes skill lets the agent set all of this up for you over chat.
+- **Extended API** (off by default for the gateway): history, dialogs, contacts, groups, channels, edits and forwards over HTTP.
+
+## How it differs from similar projects
+
+| | This project | Hermes built-in Telegram | Telegram MCP servers (e.g. chigwell/telegram-mcp) |
+|---|---|---|---|
+| Identity | your account | a bot | your account |
+| Who starts the conversation | your contacts DM you, the agent answers | users message the bot | the agent, when it calls a tool |
+| Inbound DMs reach the agent on their own | yes | yes | no, the agent has to poll |
+| Sender/recipient allowlist enforced outside the agent | yes | sender only | usually no |
 
 ```
 Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_user"  ⇄  Hermes gateway
