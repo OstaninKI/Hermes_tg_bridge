@@ -181,6 +181,7 @@ MAX_TRACKED_SEND_KEYS = 256
 
 # Skip inline media larger than this; the agent still gets the text and a marker.
 MAX_INLINE_MEDIA_BYTES = 100 * 1024 * 1024
+MEDIA_PLACEHOLDER_PREFIX = "[Telegram media: "
 
 MAX_POLL_BACKOFF_SEC = 60.0
 
@@ -261,11 +262,16 @@ def _inbound_hints(event: dict[str, Any]) -> list[str]:
     """Location, contact and hidden-link details the message text alone does not carry."""
     hints: list[str] = []
     lat, lon = event.get("latitude"), event.get("longitude")
-    geo = [f"geo:{lat},{lon}"] if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else []
-    geo += [f"{label}:{v}" for key, label in (("venue_title", "venue"), ("venue_address", "address"))
-            if (v := _hint_value(event.get(key)))]
-    if geo:
-        hints.append("[Telegram location | " + " | ".join(geo) + "]")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        # Hermes' native Telegram location text (plugins/platforms/telegram/adapter.py,
+        # _handle_location_message), minus its "ask what to find nearby" prompt: in a
+        # personal DM a pin usually means "I'm here", not a search request.
+        geo = ["[The user shared a location pin.]"]
+        geo += [f"{label}: {v}" for key, label in (("venue_title", "Venue"), ("venue_address", "Address"))
+                if (v := _hint_value(event.get(key)))]
+        geo += [f"latitude: {lat}", f"longitude: {lon}",
+                f"Map: https://www.google.com/maps/search/?api=1&query={lat},{lon}"]
+        hints.append("\n".join(geo))
 
     name = _hint_value(f"{event.get('contact_first_name') or ''} {event.get('contact_last_name') or ''}")
     contact = [f"{label}:{v}" for label, v in (
@@ -552,12 +558,14 @@ class TelegramUserAdapter(BasePlatformAdapter):
 
     def event_to_message(self, event: dict[str, Any]) -> MessageEvent:
         # A sender must not be able to type a fake "[Telegram ...]" hint.
-        text = re.sub(r"\[Telegram\s", "[TG ", str(event.get("text") or ""), flags=re.IGNORECASE)
-        if not text and event.get("has_media"):
+        text = re.sub(r"\[(Telegram|The user)\s", r"[TG ", str(event.get("text") or ""), flags=re.IGNORECASE)
+        hints = _inbound_hints(event)
+        if not text and not hints and event.get("has_media"):
+            # Dropped again once a file is attached: Hermes then writes its own media note.
             media_type = event.get("media_type") or "unknown"
-            text = f"[Telegram media: {media_type}]"
-        if hints := _inbound_hints(event):
-            text = "\n\n".join(filter(None, [text, "\n".join(hints)]))
+            text = f"{MEDIA_PLACEHOLDER_PREFIX}{media_type}]"
+        if hints:
+            text = "\n\n".join(filter(None, [text, *hints]))
 
         sender_id = str(event.get("sender_id", ""))
         sender_name = event.get("sender_name")
@@ -583,7 +591,9 @@ class TelegramUserAdapter(BasePlatformAdapter):
             reply_to_message_id=str(reply_to) if reply_to else None,
         )
 
-    async def _attach_media(self, event: dict[str, Any], message: MessageEvent) -> None:
+    async def _attach_media(
+        self, event: dict[str, Any], message: MessageEvent, *, speech_to_stt: bool = False
+    ) -> None:
         """Hand the backend's downloaded attachments to Hermes as agent-visible files.
 
         The backend writes inbound media into its own state directory; Hermes expects
@@ -634,6 +644,15 @@ class TelegramUserAdapter(BasePlatformAdapter):
                 continue
             message.media_urls.append(cached.path)
             message.media_types.append(cached.media_type)
+            if speech_to_stt and event.get("is_video_note") and cached.media_type.startswith("video/"):
+                # A video circle is mostly speech. Hermes STT reads .mp4 (SUPPORTED_FORMATS in
+                # tools/transcription_common.py) and routes any audio/* entry into it, so the
+                # same file listed again as audio gets transcribed while the video stays visible.
+                message.media_urls.append(cached.path)
+                message.media_types.append("audio/mp4")
+
+        if message.media_urls and message.text.startswith(MEDIA_PLACEHOLDER_PREFIX):
+            message.text = ""
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         try:
@@ -738,12 +757,15 @@ class TelegramUserAdapter(BasePlatformAdapter):
             message = self.event_to_message(event)
             transcript = await self._transcribe(event)
             if transcript:
-                message.text = f"[Voice message transcript]: {transcript}"
+                # Hermes' own STT format (gateway/run_inbound_transcription.py): a bare quoted
+                # line, since a "user sent a voice message" wrapper makes the model talk about voice.
+                message.text = f'"{transcript}"'
             if transcript and event.get("is_voice_note"):
-                # Already text: handing Hermes the audio too would rerun its own STT.
+                # Already text: handing Hermes the audio would rerun its STT, and VOICE would ask
+                # for a spoken reply this adapter cannot send.
                 message.message_type = MessageType.TEXT
             else:
-                await self._attach_media(event, message)
+                await self._attach_media(event, message, speech_to_stt=not transcript)
             await self.handle_message(message)
             await self.bridge.ack(event)
             logger.info("[telegram_user] inbound %s handed to Hermes", key)

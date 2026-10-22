@@ -290,6 +290,8 @@ gateway:
 
 Re-read the file to check it is valid YAML and that each `profile` exists. Mark each contact `routed` in the state file.
 
+**Transcript echo off**, in the default profile and every routed one: `hermes -p <profile> config set stt.echo_transcripts false`. Hermes otherwise posts each voice transcript back into the chat as 🎙️ "...", which here means from the user's own account to the contact.
+
 If Hermes runs as a **user** systemd service (`systemctl --user status hermes-gateway` works), the new group only applies after `sudo systemctl restart "user@$(id -u)"` or a reboot. Tell the user, because otherwise inbound photos and files fail to load.
 
 ## Step 8. Restart and test (user action)

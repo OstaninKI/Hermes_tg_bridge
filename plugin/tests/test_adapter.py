@@ -941,7 +941,9 @@ def test_premium_transcript_replaces_voice_and_falls_back_on_failure():
     async def handle_message(message):
         seen.append(message)
 
-    adapter._message_handler = handle_message
+    # Record what the adapter hands over: the real handle_message queues a sender's
+    # later messages behind its running session, which is Hermes' business, not ours.
+    adapter.handle_message = handle_message
     voice = {"sender_id": "1", "has_media": True, "mime_type": "audio/ogg", "is_voice_note": True}
 
     async def run():
@@ -951,7 +953,7 @@ def test_premium_transcript_replaces_voice_and_falls_back_on_failure():
 
     asyncio.run(run())
 
-    assert seen[0].text == "[Voice message transcript]: привет"
+    assert seen[0].text == "\"привет\""
     assert seen[0].message_type == MessageType.TEXT
     assert [m.message_type for m in seen[1:]] == [MessageType.VOICE, MessageType.VOICE]
     assert ("transcribe", 3) not in bridge.calls
@@ -966,8 +968,8 @@ def test_event_to_message_adds_location_contact_and_link_hints():
         "latitude": 55.75, "longitude": 37.62, "venue_title": "Кафе [x] | бар",
     })
     assert venue.text == (
-        "[Telegram media: MessageMediaVenue]\n\n"
-        "[Telegram location | geo:55.75,37.62 | venue:Кафе (x) / бар]"
+        "[The user shared a location pin.]\nVenue: Кафе (x) / бар\nlatitude: 55.75\nlongitude: 37.62\n"
+        "Map: https://www.google.com/maps/search/?api=1&query=55.75,37.62"
     )
 
     contact = adapter.event_to_message({
@@ -988,3 +990,56 @@ def test_event_to_message_adds_location_contact_and_link_hints():
         "see here [TG location | geo:0,0]\n\n"
         "[Telegram link | text:here | url:https://example.com/a]"
     )
+
+
+def test_media_lands_where_hermes_routes_it(tmp_path):
+    """Photos go to vision, voice and (untranscribed) video circles to STT, circles stay visible."""
+    import pytest
+
+    inbound = pytest.importorskip("gateway.run_inbound")
+    import adapter as adapter_module
+
+    if adapter_module.cache_media_bytes is None:
+        pytest.skip("needs the real Hermes media cache")
+    from io import BytesIO
+
+    from PIL import Image
+
+    jpeg = BytesIO()
+    Image.new("RGB", (4, 4)).save(jpeg, "JPEG")
+    files = {"photo.jpg": jpeg.getvalue(), "voice.ogg": b"OggS" + bytes(64), "circle.mp4": bytes(64)}
+    for name, data in files.items():
+        (tmp_path / name).write_bytes(data)
+
+    adapter = TelegramUserAdapter(AdapterConfig(allow_from=["1"]), bridge=RecordingBridge())
+    seen: list[MessageEvent] = []
+
+    async def handle_message(message):
+        seen.append(message)
+
+    adapter.handle_message = handle_message
+    media = {"sender_id": "1", "has_media": True, "media_type": "MessageMediaDocument"}
+
+    async def run():
+        await adapter._handle_inbound_event({
+            "id": 1, "sender_id": "1", "has_media": True, "media_type": "MessageMediaPhoto",
+            "mime_type": "image/jpeg", "media_path": str(tmp_path / "photo.jpg"),
+        })
+        await adapter._handle_inbound_event({
+            **media, "id": 2, "mime_type": "audio/ogg", "is_voice_note": True,
+            "media_path": str(tmp_path / "voice.ogg"),
+        })
+        await adapter._handle_inbound_event({
+            **media, "id": 3, "mime_type": "video/mp4", "is_video_note": True,
+            "media_path": str(tmp_path / "circle.mp4"),
+        })
+
+    asyncio.run(run())
+
+    classify = inbound.GatewayInboundMixin._classify_inbound_media
+    routed = [classify(message, False) for message in seen]  # (images, stt, audio files, videos)
+    assert [len(group) for group in routed[0]] == [1, 0, 0, 0]
+    assert [len(group) for group in routed[1]] == [0, 1, 0, 0]
+    assert [len(group) for group in routed[2]] == [0, 1, 0, 1]
+    assert routed[2][1] == routed[2][3]  # the circle's own file feeds STT
+    assert [message.text for message in seen] == ["", "", ""]  # Hermes writes the media notes
