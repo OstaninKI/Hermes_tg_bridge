@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-maintenance
 description: "Check and debug hermes-tg-bridge around a Hermes update, or when the Telegram user bridge misbehaves: no replies, a reply from the wrong profile, lost settings, cron results not delivered. Backup before, checklist after, where to look in the logs."
-version: 1.0.2
+version: 1.0.3
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -88,16 +88,21 @@ grep -h "telegram_user" "$HOME/.hermes/logs/"*.log | grep -i "startup\|API chang
 
 "It answered" is not enough. Check **which profile** owns the session.
 
-Use a **unique marker per contact**, and look for it only in each profile's **own session store** (`state.db`), not in shared files:
+Use a **unique marker per contact**, and look for it only in each profile's **own session store** (`state.db`), only in messages that the contact sent through `telegram_user`. The filters matter: when you tell the user the marker in this chat, that message lands in your own profile's store too, and an unfiltered search would wrongly blame the routing.
 
-1. Make a marker for each contact you test, for example `M=route-check-$(python3 -c 'import secrets; print(secrets.token_hex(4))')`, and write it down next to the contact.
-2. Ask the user to have that contact send a DM containing exactly the marker. Wait until the agent has replied.
-3. List, per profile, the sessions whose messages contain the marker (read-only, prints no message text):
+1. Make a marker for each contact you test, for example `M=route-check-$(python3 -c 'import secrets; print(secrets.token_hex(4))')`, and write it down next to the contact and their numeric id (`ID`, from the state file).
+2. Ask the user to have that contact send a DM with **only** the marker, nothing else. Wait until the agent has replied.
+3. List, per profile, the sessions that hold this message (read-only, prints no message text):
 
    ```bash
-   python3 - "$M" <<'EOF'
+   python3 - "$M" "$ID" <<'EOF'
    import glob, os, sqlite3, sys
-   m, home = sys.argv[1], os.path.expanduser("~/.hermes")
+   marker, chat_id, home = sys.argv[1], sys.argv[2], os.path.expanduser("~/.hermes")
+   query = """
+       SELECT DISTINCT s.id, s.profile_name
+       FROM messages AS m JOIN sessions AS s ON s.id = m.session_id
+       WHERE m.role = 'user' AND m.content = ? AND s.source = 'telegram_user' AND s.chat_id = ?
+   """
    dbs = {"default": f"{home}/state.db"}
    dbs.update({p.split("/")[-2]: p for p in glob.glob(f"{home}/profiles/*/state.db")})
    for name, db in sorted(dbs.items()):
@@ -105,18 +110,17 @@ Use a **unique marker per contact**, and look for it only in each profile's **ow
            print(name, "no state.db"); continue
        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
        try:
-           rows = c.execute("select distinct session_id from messages where content like ?", (f"%{m}%",)).fetchall()
+           rows = c.execute(query, (marker, chat_id)).fetchall()
        except sqlite3.Error as e:
            print(name, "SCHEMA?", e, [t for (t,) in c.execute("select name from sqlite_master where type='table'")]); continue
-       print(name, [r[0] for r in rows] or "none")
+       print(name, rows or "none")
    EOF
    ```
 
-Expected: a session id **only** in the contact's profile from the state file, and `none` everywhere else. Then:
+Expected: a session **only** in the contact's profile from the state file, with a matching `profile_name`, and `none` everywhere else. Then:
 - **Session in another profile, or in `default` for a routed contact:** routing broke. Check that the route still matches (`platform: telegram_user`, `user_id` as a quoted numeric string), and whether Hermes changed the `profile_routes` format in its changelog.
-- **`none` everywhere:** the message never reached a session. Check the logs below.
-- **`SCHEMA?`:** Hermes changed its session store. Do not conclude anything: look at the printed tables, find where messages live now, and tell the user the check needs an update.
-- As a second check, open that session with Hermes' own session commands for that profile (`hermes -p <profile> ...`) and confirm it is a `telegram_user` session with that contact.
+- **`none` everywhere:** this does **not** prove the message was lost. Check that the contact sent exactly the marker, and check the logs below.
+- **`SCHEMA?`:** Hermes changed its session store. Do not conclude anything: look at the printed tables, adapt the query to the new schema with the same filters, and tell the user the skill needs an update.
 
 To see what happened on the way, check the logs:
 
