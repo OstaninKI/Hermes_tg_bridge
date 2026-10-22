@@ -77,6 +77,8 @@ hermes skills install https://raw.githubusercontent.com/OstaninKI/Hermes_tg_brid
 
 Then send `/telegram-user-bridge-setup` in your chat with Hermes.
 
+Before installing, the agent asks which Hermes [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) should answer each allowed contact. One bridge and one plugin serve them all: `gateway.profile_routes` sends each contact to their own profile, with its own memory and persona, while senders outside the allowlist are ignored. It keeps its progress and your answers in `~/.hermes/tg-bridge-setup.md` (no secrets), so it picks up where it left off after each restart.
+
 The agent needs the **local** terminal backend (commands must run on the Hermes host, not in a sandbox) and passwordless `sudo` for the system-service layout. Without passwordless `sudo` it asks you to run the few root commands yourself.
 
 ## Manual install

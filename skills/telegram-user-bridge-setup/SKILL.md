@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.3.0
+version: 1.4.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -25,6 +25,41 @@ You are installing [hermes-tg-bridge](https://github.com/OstaninKI/Hermes_tg_bri
 - **Never restart the gateway yourself.** `hermes gateway restart` waits for your own turn to finish and hangs. The user sends `/restart` at the end.
 - **Tell the user up front:** "Some commands may need your approval in this chat (`/approve`)."
 - **Talk to the user in their language.** The quoted prompts below are templates; translate them.
+- **Keep a state file and resume from it.** This install spans several restarts, and you lose your context and shell variables on each one. See [State file](#state-file).
+- **Never guess which Hermes profile answers whom.** Ask in step 1. A contact without a route lands in the default profile, the one that usually runs the user's bot.
+
+## State file
+
+Path: `$HOME/.hermes/tg-bridge-setup.md`, mode 0600. It is the same for every Hermes profile. It holds decisions and progress, **never secrets**.
+
+- **At the very start**, before step 0: if the file exists, read it. Tell the user what is already done and which decisions are recorded, then continue from the first unfinished step. Do not ask again for anything already recorded unless the user wants to change it.
+- **Before trusting a recorded step**, re-run its check (for example `/health`, `hermes profile list`, the `.env` keys). If the check fails, redo the step.
+- **Update the file** right after each user answer and each finished step, before you reply.
+- **Shell variables do not survive.** Recreate `H` (step 5) in every command block that uses it. If `/tmp/tg-bridge-token` is gone (reboot, `PrivateTmp`), recreate it from `secret.env`: `sudo sed -n 's/^TELEGRAM_BRIDGE_API_TOKEN=//p' /etc/hermes-tg-bridge/secret.env > /tmp/tg-bridge-token` under `umask 077`.
+
+Format:
+
+```markdown
+# hermes-tg-bridge setup state
+skill_version: 1.4.0
+updated: <ISO date>
+last_step_done: <0..8>
+hermes_user: <id -un>
+current_profile: <profile this chat runs in, "default" for ~/.hermes>
+sudo: yes | no
+linked_account: <name/@username after step 6>
+
+## Profiles
+| contact (numeric id) | label | Hermes profile | new profile? | status |
+|---|---|---|---|---|
+
+home_channel: <id or none>
+
+## Decisions
+- <date>: <question> -> <user's answer, in their words>
+```
+
+Status per contact: `planned`, `profile_ready`, `routed`, `tested`.
 
 Fixed layout, used in every command below:
 
@@ -42,39 +77,46 @@ Run and check:
 ```bash
 uname -s; systemctl --version | head -1; python3 --version; git --version; hermes --version
 id -un; echo "${HERMES_HOME:-$HOME/.hermes}"
+hermes profile list
 sudo -n true && echo SUDO_OK || echo SUDO_NO
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/health
 ```
 
 - **Not Linux, no systemd, or `hermes` not found in the terminal** (a sandboxed terminal backend): stop. Tell the user this skill needs the local terminal on a Linux/systemd host and point them to the manual install in the repository README.
 - **Python older than 3.11:** stop and say so.
-- **Port 8765 already answers:** a bridge may already be installed. Ask the user whether to reuse it (skip to step 5 or 7) or stop.
-- **Remember:** `HERMES_USER=$(id -un)`, the Hermes home, and whether you have `SUDO_OK`.
+- **Port 8765 already answers:** a bridge may already be installed. If the state file covers it, resume. Otherwise ask the user whether to reuse it (do step 1, then the policy part of step 4, then 7 and 8) or stop.
+- **Write to the state file:** `hermes_user`, `current_profile` (the profile whose home is `$HERMES_HOME`), `sudo`, and the output of `hermes profile list` as a decision line. Also record any existing `gateway.profile_routes` in `~/.hermes/config.yaml`.
 
 **If `SUDO_NO`:** every block marked *(root)* below goes into one file, `/tmp/hermes-tg-bridge-root.sh`, instead of being run directly. Build that file progressively, with any secrets read from files, never inlined. Show the user its full contents and ask them to run `sudo sh /tmp/hermes-tg-bridge-root.sh` over SSH and reply "done". Then verify the result yourself before continuing.
 
-Tell the user what you are about to do (an install in about 8 steps, roughly 10 minutes of their time). In the same message, give them these warnings (details: the README section "Legal and Telegram terms"):
+Tell the user what you are about to do (an install in about 9 steps, roughly 10 minutes of their time). In the same message, give them these warnings (details: the README section "Legal and Telegram terms"):
 
 > "This is an unofficial project. I will write on your behalf, from your account, so Telegram treats everything I send as yours and can limit or ban the account if people report it as spam. Telegram's terms also require each person whose messages reach an AI to explicitly agree to that, so tell everyone you allow that an AI answers them, and get a clear yes first."
 
 Ask whether to proceed. **Wait.**
 
-## Step 1. Allowed contacts (ask)
+## Step 1. Contacts and profiles (ask)
 
-> "Who should be able to talk to me through your Telegram account? Send their Telegram @usernames or numeric ids, comma-separated. Only these people will reach me; everyone else is ignored. List only people who have agreed that an AI answers them. (You cannot test by writing to yourself: Saved Messages are not DMs.)"
+How it works: one bridge listens to the user's account. The plugin runs once, in the default profile (`~/.hermes`), which hosts the multiplexed gateway. `gateway.profile_routes` sends each allowed contact to a Hermes profile: each profile has its own memory, persona and sessions. Senders outside the allowlist are dropped by the backend and the plugin and reach no profile. Senders on the allowlist without a route go to the **default** profile.
 
-**Wait.** Normalize the answer:
-- Numeric ids stay as they are.
-- Usernames keep their leading `@`.
-- Reject anything else.
+Ask:
 
-Remember the result as `ALLOWED`, a list. Ask once more if it is empty.
+> "Who should be able to talk to me through your Telegram account? List only people who have agreed that an AI answers them. (You cannot test by writing to yourself: Saved Messages are not DMs.)
+>
+> For each person, which agent (Hermes profile) should answer them? Your profiles now: `<hermes profile list>`. You can pick an existing profile, ask for a new one (it gets its own memory), or use `default`. Note that `default` is the agent that runs your bot, so they would share memory with it."
+
+**Wait.** Then:
+- **Numeric ids only.** Routes match the numeric Telegram user id, not the @username. If the user only knows a username, ask them to get the id (for example, forward one of that person's messages to @userinfobot) or to have the person DM the account once, then read `sender_id` from `journalctl -u hermes-tg-bridge` after step 6.
+- One person, one profile. Several people may share a profile.
+- **Someone else's own Telegram account** (e.g. the wife wants an AI on her account rather than to talk to the user's): that needs a second bridge instance with its own login, which this skill does not cover. Say so and leave it out.
+- For each **new** profile ask:
+  > "Should the new profile `<name>` start as a copy of `default` (same model, keys and tools, **and also its memory and persona**) or as a copy without memory? I'll clear the memory files in the second case."
 
 Optionally ask:
 
-> "Should scheduled (cron) results go to one of them, or to someone else? Send an id/@username or 'no'."
+> "Should scheduled (cron) results go to one of them, or to someone else? Send a numeric id or 'no'."
 
-Remember the answer as `HOME_CHANNEL`.
+Show the final table back and ask the user to confirm it. **Wait.** Write it and the answers to the state file.
 
 ## Step 2. Telegram API credentials (user action)
 
@@ -114,20 +156,20 @@ Write `/etc/hermes-tg-bridge/secret.env` (`root:hermes-tg`, 0640) with these key
 
 Build it with shell redirection from those files (for example `{ sudo cat /tmp/tg-api; printf 'TELEGRAM_BRIDGE_API_TOKEN=%s\n' "$(cat /tmp/tg-bridge-token)"; echo HERMES_QR_PASSWORD_TIMEOUT=900; echo TELEGRAM_DISABLE_EXTENDED_API=1; } | sudo tee /etc/hermes-tg-bridge/secret.env >/dev/null`), then `sudo chown root:hermes-tg` and `sudo chmod 0640` it. If the API values came through chat, first write them to a 0600 `/tmp/tg-api` the same way. Remove it afterwards with `sudo rm -f /tmp/tg-api`.
 
-Write `/etc/hermes-tg-bridge/policy.json` (`root:hermes-tg`, 0640), with `ALLOWED` in both lists, plus `HOME_CHANNEL` in `write.allow` if set:
+Write `/etc/hermes-tg-bridge/policy.json` (`root:hermes-tg`, 0640) with **all** contacts from step 1 in both lists, plus the home channel in `write.allow` if set:
 
 ```json
 {
   "profiles": {
     "dm_inbox": {
-      "read":  { "allow": ["<ALLOWED...>"], "deny": [] },
-      "write": { "allow": ["<ALLOWED...>", "<HOME_CHANNEL>"], "deny": [] }
+      "read":  { "allow": ["<all contacts...>"], "deny": [] },
+      "write": { "allow": ["<all contacts...>", "<home channel>"], "deny": [] }
     }
   }
 }
 ```
 
-Validate it with `python3 -m json.tool`.
+Validate it with `python3 -m json.tool`. If the backend already runs (adding contacts later), apply it with `sudo systemctl restart hermes-tg-bridge`.
 
 ## Step 5. Start the backend (root)
 
@@ -193,22 +235,40 @@ curl -s -H @"$H" http://127.0.0.1:8765/me     # the user's account
 
 Tell the user which account is linked (name/@username from `/me`) and that a new linked device now appears in Telegram → Settings → Devices; terminating it there cuts the bridge off.
 
-## Step 7. Install the plugin (no user action)
+## Step 7. Plugin, profiles and routes (no user action)
+
+**Plugin, in the default profile only** (`HH=$HOME/.hermes`, whichever profile you run in):
 
 ```bash
-HH="${HERMES_HOME:-$HOME/.hermes}"
+HH="$HOME/.hermes"
 mkdir -p "$HH/plugins" && rm -rf "$HH/plugins/hermes-telegram-user"
 cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HH/plugins/"
-hermes plugins enable hermes-telegram-user
+hermes -p default plugins enable hermes-telegram-user
 sudo usermod -aG hermes-tg "$(id -un)"        # (root) read inbound media
 ```
 
 Add these to `$HH/.env`, replacing existing keys rather than duplicating them, and keep the file mode 0600:
 - `HERMES_TG_BRIDGE_API_TOKEN`: from `/tmp/tg-bridge-token`, written by redirection, never echoed;
-- `HERMES_TG_ALLOWED_USERS`: `ALLOWED`, comma-separated;
+- `HERMES_TG_ALLOWED_USERS`: all contacts, comma-separated;
 - `HERMES_TG_HOME_CHANNEL`: only if set.
 
 Then clean up with `rm -f /tmp/tg-bridge-token "$H"`.
+
+**New profiles**, from the table: `hermes profile create <name> --clone` (copies config, `.env`, `SOUL.md`, skills and memory from `default`, without messaging channels, so the copy does not take over the user's bot). If the user chose no memory, list `~/.hermes/profiles/<name>/`, show the user which memory files you will empty, and empty them after they agree. Check `hermes profile list`. Do not install a gateway for it: the multiplexed gateway picks new profiles up.
+
+**Routes**, in `$HH/config.yaml`: make sure `gateway.multiplex_profiles` is `true` and add one entry per contact routed to a non-default profile, keeping any existing routes:
+
+```yaml
+gateway:
+  multiplex_profiles: true
+  profile_routes:
+    - name: tg-user-<label>
+      platform: telegram_user
+      user_id: "<numeric id>"
+      profile: <profile>
+```
+
+Re-read the file to check it is valid YAML and that each `profile` exists. Mark each contact `routed` in the state file.
 
 If Hermes runs as a **user** systemd service (`systemctl --user status hermes-gateway` works), the new group only applies after `sudo systemctl restart "user@$(id -u)"` or a reboot. Tell the user, because otherwise inbound photos and files fail to load.
 
@@ -216,30 +276,34 @@ If Hermes runs as a **user** systemd service (`systemctl --user status hermes-ga
 
 > "Everything is installed. Send **/restart** here. I'll go offline for a moment and confirm when I'm back."
 
-**Wait.** After the restart, when the user writes again:
+**Wait.** After the restart, when the user writes again, read the state file first. Then:
 
 ```bash
 hermes gateway status
-grep -i "telegram_user\|Telegram User" "${HERMES_HOME:-$HOME/.hermes}/logs/"*.log | tail -5
+grep -i "telegram_user\|Telegram User\|profile_route" "$HOME/.hermes/logs/"*.log | tail -10
 ```
 
 Look for the platform being connected and for no `bridge_unauthorized` or `bridge_unavailable` errors. Then:
 
-> "Ask one of the allowed contacts to send a DM to your account. I should reply from your account within a few seconds."
+> "Ask one contact per profile to send a DM to your account. Each should get a reply from your account within a few seconds, from the agent of their profile."
 
 **Wait** for confirmation. On failure:
 - `journalctl -u hermes-tg-bridge -n 50`;
 - the Hermes logs;
-- whether the sender's id/username is in both `policy.json` and `HERMES_TG_ALLOWED_USERS`.
+- whether the sender's id is in both `policy.json` and `HERMES_TG_ALLOWED_USERS`;
+- for a reply from the wrong agent: the sender's `user_id` in `profile_routes`, and the gateway log line for that route.
 
 ## Done
 
+Set `last_step_done: 8` in the state file and keep the file: it records the layout for later changes.
+
 Summarize for the user:
 - the linked account;
-- the allowed contacts;
+- each contact with its profile;
 - the cron home channel, if any.
 
 Also tell them how to change and how to remove things:
-- **Allowed contacts:** edit `/etc/hermes-tg-bridge/policy.json` and `HERMES_TG_ALLOWED_USERS` in `~/.hermes/.env`, then `sudo systemctl restart hermes-tg-bridge` and `/restart`.
+- **Adding contacts or moving them between profiles:** ask me to run this skill again; I'll read the state file and only redo steps 1, 4 (policy), 7 and 8.
+- **By hand:** a new contact goes into `/etc/hermes-tg-bridge/policy.json`, `HERMES_TG_ALLOWED_USERS` in `~/.hermes/.env` and, for a non-default profile, `gateway.profile_routes` in `~/.hermes/config.yaml`. Then `sudo systemctl restart hermes-tg-bridge` and `/restart`.
 - **Unlinking:** terminate the session in Telegram → Settings → Devices, and/or run `sudo systemctl disable --now hermes-tg-bridge`.
-- **Uninstalling:** also remove `/opt/hermes-tg-bridge`, `/etc/hermes-tg-bridge`, `/var/lib/hermes-tg-bridge*` and `~/.hermes/plugins/hermes-telegram-user`.
+- **Uninstalling:** also remove `/opt/hermes-tg-bridge`, `/etc/hermes-tg-bridge`, `/var/lib/hermes-tg-bridge*`, `~/.hermes/plugins/hermes-telegram-user`, the `tg-user-*` entries in `profile_routes`, and `~/.hermes/tg-bridge-setup.md`.
