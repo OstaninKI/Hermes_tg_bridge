@@ -9,6 +9,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
+from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +28,14 @@ try:
         cache_media_bytes,
         classify_send_error,
     )
-except ImportError:  # pragma: no cover - exercised only outside a Hermes install
+except ImportError as _gateway_error:  # pragma: no cover - exercised only outside a Hermes install
+    # Only a missing ``gateway`` package means "not inside Hermes". A missing name
+    # or submodule in an installed gateway means a Hermes update changed the API:
+    # fail the plugin load instead of running on the shim below.
+    if _gateway_error.name != "gateway":
+        raise ImportError(
+            f"[telegram_user] Hermes gateway API changed, plugin needs an update: {_gateway_error}"
+        ) from _gateway_error
     # Test/standalone shim. Mirrors the real gateway API (NousResearch/hermes-agent,
     # gateway/platforms/base.py) closely enough to exercise adapter logic; anything
     # added here must match the upstream signature it stands in for.
@@ -581,7 +589,7 @@ class TelegramUserAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         try:
-            await self.bridge.health()
+            health = await self.bridge.health()
         except Exception as exc:
             logger.error("[telegram_user] bridge health check failed: %s", exc)
             self._set_fatal_error("bridge_unavailable", str(exc), retryable=True)
@@ -592,6 +600,8 @@ class TelegramUserAdapter(BasePlatformAdapter):
             "[telegram_user] connected to bridge at %s (reconnect=%s)",
             self.adapter_config.bridge_url, is_reconnect,
         )
+        if not is_reconnect:
+            logger.info("[telegram_user] startup %s", startup_summary(self.adapter_config, health))
         return True
 
     async def disconnect(self) -> None:
@@ -668,6 +678,7 @@ class TelegramUserAdapter(BasePlatformAdapter):
             await self._attach_media(event, message)
             await self.handle_message(message)
             await self.bridge.ack(event)
+            logger.info("[telegram_user] inbound %s handed to Hermes", key)
         except Exception as exc:
             attempts = self._record_failure(key)
             if attempts < MAX_EVENT_ATTEMPTS:
@@ -734,7 +745,9 @@ class TelegramUserAdapter(BasePlatformAdapter):
                 idempotency_key=self._idempotency_key(chat_id, content, reply_to_id),
             )
         except Exception as exc:
-            return _send_failure(exc)
+            failure = _send_failure(exc)
+            logger.warning("[telegram_user] send to %s failed: %s", chat_id, failure.error)
+            return failure
 
         message_id = None
         continuation: tuple = ()
@@ -745,6 +758,7 @@ class TelegramUserAdapter(BasePlatformAdapter):
             extra_ids = payload.get("message_ids")
             if isinstance(extra_ids, list) and len(extra_ids) > 1:
                 continuation = tuple(str(item) for item in extra_ids[1:] if item is not None)
+        logger.info("[telegram_user] sent to %s (message %s)", chat_id, message_id)
         return SendResult(
             success=True,
             message_id=str(message_id) if message_id is not None else None,
@@ -803,6 +817,47 @@ def _send_failure(exc: Exception) -> SendResult:
 HOME_CHANNEL_ENV = "HERMES_TG_HOME_CHANNEL"
 
 
+def _plugin_version() -> str:
+    manifest = Path(__file__).with_name("plugin.yaml")
+    try:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def _hermes_version() -> str:
+    try:
+        return metadata.version("hermes-agent")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def startup_summary(config: AdapterConfig, health: Any = None) -> str:
+    """One greppable line of what this process runs with, without secrets.
+
+    Diff it before/after a Hermes update to see what changed under the bridge.
+    """
+    status = health.get("status") if isinstance(health, dict) else None
+    fields = {
+        "plugin": _plugin_version(),
+        "hermes": _hermes_version(),
+        "hermes_home": os.getenv("HERMES_HOME") or "~/.hermes",
+        "bridge": config.bridge_url,
+        "bridge_status": status or "unknown",
+        "token_set": bool(config.api_token),
+        "policy": config.policy_profile,
+        "allowed_users": len(config.allow_from),
+        "allow_all": config.allow_all_users,
+        "home_channel_set": bool(os.getenv(HOME_CHANNEL_ENV, "").strip()),
+        "mark_read": config.mark_read_on_inbound,
+        "typing": config.typing_while_replying,
+    }
+    return " ".join(f"{key}={value}" for key, value in fields.items())
+
+
 def check_requirements() -> bool:
     """Dependency check. Configuration is validated separately by validate_config."""
     return httpx is not None
@@ -836,10 +891,13 @@ async def _standalone_send(
     try:
         payload = await bridge.send_message(chat_id, message)
     except Exception as exc:
-        return {"error": _send_failure(exc).error}
+        error = _send_failure(exc).error
+        logger.warning("[telegram_user] standalone (cron) send to %s failed: %s", chat_id, error)
+        return {"error": error}
     finally:
         await bridge.close()
     message_id = payload.get("message_id", payload.get("id")) if isinstance(payload, dict) else None
+    logger.info("[telegram_user] standalone (cron) send to %s ok (message %s)", chat_id, message_id)
     return {"success": True, "message_id": str(message_id) if message_id is not None else None}
 
 
@@ -866,6 +924,16 @@ def _env_enablement() -> dict[str, Any] | None:
 
 
 def register(ctx: Any) -> Any:
+    try:
+        return _register(ctx)
+    except TypeError as exc:
+        # A renamed or dropped register_platform() argument after a Hermes update.
+        raise TypeError(
+            f"[telegram_user] Hermes register_platform() API changed, plugin needs an update: {exc}"
+        ) from exc
+
+
+def _register(ctx: Any) -> Any:
     return ctx.register_platform(
         name=TelegramUserAdapter.platform_name,
         label="Telegram User",

@@ -50,6 +50,7 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 - **`backend/`**: an HTTP service built on FastAPI and Telethon. It owns the Telegram session and enforces the access policy: who may write to the agent and who the agent may write to.
 - **`plugin/hermes-telegram-user/`**: the Hermes platform plugin. It polls the backend for DMs and sends replies back.
 - **`skills/telegram-user-bridge-setup/`**: a Hermes skill that lets the agent install all of this for you over chat (see [Agent-assisted install](#agent-assisted-install)).
+- **`skills/telegram-user-bridge-maintenance/`**: a Hermes skill for Hermes updates and debugging: backup before, a checklist after (plugin loaded, settings unchanged, each contact in its profile, cron delivery), and what each log line means.
 - **`deploy/`**: example systemd unit, backend policy and Hermes config.
 - **`create_telethon_session.sh`**: an interactive login helper, if you prefer creating the session by hand.
 
@@ -76,6 +77,8 @@ hermes skills install https://raw.githubusercontent.com/OstaninKI/Hermes_tg_brid
 ```
 
 Then send `/telegram-user-bridge-setup` in your chat with Hermes.
+
+Before and after each Hermes update, use the maintenance skill. Install it the same way (`.../skills/telegram-user-bridge-maintenance/SKILL.md`) and send `/telegram-user-bridge-maintenance`.
 
 Before installing, the agent asks which Hermes [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) should answer each allowed contact. One bridge and one plugin serve them all: `gateway.profile_routes` sends each contact to their own profile, with its own memory and persona, while senders outside the allowlist are ignored. It keeps its progress and your answers in `~/.hermes/tg-bridge-setup.md` (no secrets), so it picks up where it left off after each restart.
 

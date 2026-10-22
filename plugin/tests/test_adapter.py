@@ -855,3 +855,51 @@ def test_env_enablement_seeds_home_channel(monkeypatch):
     assert _env_enablement()["home_channel"] == {"chat_id": "123", "name": "Home"}
     monkeypatch.delenv("HERMES_TG_HOME_CHANNEL")
     assert "home_channel" not in _env_enablement()
+
+
+def test_startup_summary_reports_settings_without_the_token(monkeypatch):
+    from adapter import startup_summary
+
+    monkeypatch.setenv("HERMES_HOME", "/home/u/.hermes/profiles/wife")
+    monkeypatch.setenv("HERMES_TG_HOME_CHANNEL", "42")
+    config = AdapterConfig(api_token="s3cret-token", allow_from=["1", "2"])
+
+    line = startup_summary(config, {"status": "ok", "connected": True})
+
+    assert "s3cret-token" not in line
+    for part in (
+        "plugin=0.1.0", "hermes_home=/home/u/.hermes/profiles/wife", "bridge_status=ok",
+        "token_set=True", "allowed_users=2", "home_channel_set=True",
+    ):
+        assert part in line
+
+
+def test_plugin_refuses_to_load_on_a_changed_hermes_api(monkeypatch):
+    """An installed gateway missing a name must fail the load, not fall back to the shim."""
+    import importlib.util
+    import types
+
+    import pytest
+
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    gateway_config = types.ModuleType("gateway.config")  # no Platform / PlatformConfig
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.config", gateway_config)
+
+    path = Path(sys.modules["adapter"].__file__)
+    spec = importlib.util.spec_from_file_location("adapter_api_changed", path)
+    module = importlib.util.module_from_spec(spec)
+    with pytest.raises(ImportError, match="Hermes gateway API changed"):
+        spec.loader.exec_module(module)
+
+
+def test_register_names_the_plugin_when_register_platform_rejects_an_argument():
+    import pytest
+
+    class OldCtx:
+        def register_platform(self, *, name, label):
+            return "registered"
+
+    with pytest.raises(TypeError, match="register_platform\\(\\) API changed"):
+        register(OldCtx())

@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.4.0
+version: 1.4.1
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -41,7 +41,7 @@ Format:
 
 ```markdown
 # hermes-tg-bridge setup state
-skill_version: 1.4.0
+skill_version: 1.4.1
 updated: <ISO date>
 last_step_done: <0..8>
 hermes_user: <id -un>
@@ -306,4 +306,5 @@ Also tell them how to change and how to remove things:
 - **Adding contacts or moving them between profiles:** ask me to run this skill again; I'll read the state file and only redo steps 1, 4 (policy), 7 and 8.
 - **By hand:** a new contact goes into `/etc/hermes-tg-bridge/policy.json`, `HERMES_TG_ALLOWED_USERS` in `~/.hermes/.env` and, for a non-default profile, `gateway.profile_routes` in `~/.hermes/config.yaml`. Then `sudo systemctl restart hermes-tg-bridge` and `/restart`.
 - **Unlinking:** terminate the session in Telegram → Settings → Devices, and/or run `sudo systemctl disable --now hermes-tg-bridge`.
+- **Hermes updates:** before and after each one, run the `telegram-user-bridge-maintenance` skill (same repository, `skills/telegram-user-bridge-maintenance/SKILL.md`). It backs up state and checks that every contact still reaches its profile. Offer to install it now.
 - **Uninstalling:** also remove `/opt/hermes-tg-bridge`, `/etc/hermes-tg-bridge`, `/var/lib/hermes-tg-bridge*`, `~/.hermes/plugins/hermes-telegram-user`, the `tg-user-*` entries in `profile_routes`, and `~/.hermes/tg-bridge-setup.md`.
