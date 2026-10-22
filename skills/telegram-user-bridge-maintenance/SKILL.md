@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-maintenance
 description: "Check and debug hermes-tg-bridge around a Hermes update, or when the Telegram user bridge misbehaves: no replies, a reply from the wrong profile, lost settings, cron results not delivered. Backup before, checklist after, where to look in the logs."
-version: 1.0.3
+version: 1.0.4
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -184,70 +184,39 @@ If the update broke the plugin and no plugin update exists yet: roll Hermes back
 
 ## Updating the bridge
 
-The old backend tree, with its `.venv`, is kept untouched under a dated name until the new one is proven, so rollback is one `mv`. Record every path below (`OLD`, `PB`) in your reply to the user, because shell variables do not survive a restart.
+The privileged part lives in a script in the repository, `deploy/update-bridge.sh`, not in this skill. It deletes nothing: it stops the service, moves the running tree (with its `.venv`) aside as `/opt/hermes-tg-bridge.bak-<stamp>`, installs the new tree with a fresh `.venv`, checks `/health`, and rolls back by itself if any step fails. The Telegram session and state in `/var/lib/hermes-tg-bridge` are not touched.
 
-**1. Get the new code and show what changes.** First check how `/opt/hermes-tg-bridge` was installed: `[ -d /opt/hermes-tg-bridge/.git ] && echo GIT || echo ARCHIVE`.
-
-- **ARCHIVE** (unpacked from a tarball):
-
-  ```bash
-  T=$(mktemp -d); curl -fsSL https://github.com/OstaninKI/Hermes_tg_bridge/archive/refs/heads/main.tar.gz | tar -xz -C "$T"
-  N="$T/Hermes_tg_bridge-main"; diff -rq --exclude=.venv --exclude=__pycache__ /opt/hermes-tg-bridge "$N"
-  ```
-
-  For a fixed version instead of `main`, use `archive/<commit or tag>.tar.gz` and the matching directory name.
-- **GIT:** `sudo git -C /opt/hermes-tg-bridge fetch && sudo git -C /opt/hermes-tg-bridge log --oneline HEAD..origin/main`.
-
-Show the user the changes and wait for their OK.
-
-**2. Swap the backend.** The service is stopped before the tree changes:
+**1. Get the new code and show what changes** (no root needed, nothing is replaced yet):
 
 ```bash
-OLD="/opt/hermes-tg-bridge.bak-$(date +%Y%m%d-%H%M)"
-sudo systemctl stop hermes-tg-bridge
+T=$(mktemp -d); curl -fsSL https://github.com/OstaninKI/Hermes_tg_bridge/archive/main.tar.gz | tar -xz -C "$T"
+N="$T/Hermes_tg_bridge-main"; diff -rq --exclude=.venv --exclude=.git --exclude=__pycache__ /opt/hermes-tg-bridge "$N"
 ```
 
-- **ARCHIVE:** the old tree moves aside whole, and the new one gets a fresh `.venv`:
+For a fixed version instead of `main`, use `archive/<commit or tag>.tar.gz` and pass the same ref to the script below. Show the user the changes, and the full script `"$N/deploy/update-bridge.sh"` if they want to review it. Wait for their OK.
 
-  ```bash
-  sudo mv /opt/hermes-tg-bridge "$OLD"
-  sudo mv "$N" /opt/hermes-tg-bridge && sudo chown -R root:root /opt/hermes-tg-bridge
-  sudo python3 -m venv /opt/hermes-tg-bridge/backend/.venv
-  ```
-
-- **GIT:** keep a full copy aside, then fast-forward in place:
-
-  ```bash
-  sudo cp -a /opt/hermes-tg-bridge "$OLD"
-  sudo git -C /opt/hermes-tg-bridge merge --ff-only origin/main
-  ```
-
-Then, both ways:
+**2. Update the backend** with the script from the **new** code you just showed (root; with `SUDO_NO`, give the user the command to run over SSH):
 
 ```bash
-sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install -q '/opt/hermes-tg-bridge/backend[fast]'
-sudo systemctl start hermes-tg-bridge; sleep 5; curl -s http://127.0.0.1:8765/health
+sudo sh "$N/deploy/update-bridge.sh" update main
 ```
 
-Expect `{"status":"ok","connected":true}`. The Telegram session and state live in `/var/lib/hermes-tg-bridge` and are not touched.
+It prints `UPDATED ...` with the exact rollback command, or `update failed, rolling back` and then `ROLLED_BACK ...`. Write the backup path into your reply, because shell variables do not survive a restart.
 
-**Backend rollback**, if `pip` fails or health is not `ok`. The old tree goes back to its original path, so its `.venv` works again:
+Manual rollback later, if the new backend misbehaves:
 
 ```bash
-sudo systemctl stop hermes-tg-bridge
-sudo rm -rf /opt/hermes-tg-bridge && sudo mv "$OLD" /opt/hermes-tg-bridge
-sudo systemctl start hermes-tg-bridge; sleep 5; curl -s http://127.0.0.1:8765/health
+sudo sh /opt/hermes-tg-bridge/deploy/update-bridge.sh rollback /opt/hermes-tg-bridge.bak-<stamp>
 ```
 
-**3. Swap the plugin:**
+**3. Swap the plugin.** The old copy moves to the backups folder, outside `plugins/`, so Hermes does not load it twice:
 
 ```bash
-PB="$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M)"; P="$HOME/.hermes/plugins/hermes-telegram-user"
-mkdir -p "$(dirname "$PB")" && cp -a "$P" "$PB"
-rm -rf "$P" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HOME/.hermes/plugins/"
+P="$HOME/.hermes/plugins/hermes-telegram-user"; PB="$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$HOME/.hermes/backups" && mv "$P" "$PB" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$P"
 hermes plugins doctor 2>&1 | grep -i -A3 telegram
 ```
 
-Plugin rollback: `rm -rf "$P" && cp -a "$PB" "$P"`, then `/restart`.
+Plugin rollback: `mv "$P" "$PB.failed" && mv "$PB" "$P"`, then `/restart`.
 
-**4.** The user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart). Once everything passes, tell the user that `$OLD` and `$PB` can be deleted after a few days.
+**4.** The user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart). Once everything passes, tell the user which old copies they can remove themselves after a few days: `/opt/hermes-tg-bridge.bak-*`, `/opt/hermes-tg-bridge.failed-*`, the plugin backup and `$T`.

@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.4.3
+version: 1.4.4
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -41,7 +41,7 @@ Format:
 
 ```markdown
 # hermes-tg-bridge setup state
-skill_version: 1.4.3
+skill_version: 1.4.4
 updated: <ISO date>
 last_step_done: <0..8>
 hermes_user: <id -un>
@@ -255,7 +255,8 @@ Tell the user which account is linked (name/@username from `/me`) and that a new
 
 ```bash
 HH="$HOME/.hermes"
-mkdir -p "$HH/plugins" && rm -rf "$HH/plugins/hermes-telegram-user"
+mkdir -p "$HH/plugins" "$HH/backups"
+[ -e "$HH/plugins/hermes-telegram-user" ] && mv "$HH/plugins/hermes-telegram-user" "$HH/backups/plugin-$(date +%Y%m%d-%H%M%S)"
 cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HH/plugins/"
 hermes -p default plugins enable hermes-telegram-user
 sudo usermod -aG hermes-tg "$(id -un)"        # (root) read inbound media

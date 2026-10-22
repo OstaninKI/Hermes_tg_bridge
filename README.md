@@ -51,7 +51,7 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 - **`plugin/hermes-telegram-user/`**: the Hermes platform plugin. It polls the backend for DMs and sends replies back.
 - **`skills/telegram-user-bridge-setup/`**: a Hermes skill that lets the agent install all of this for you over chat (see [Agent-assisted install](#agent-assisted-install)).
 - **`skills/telegram-user-bridge-maintenance/`**: a Hermes skill for Hermes updates and debugging: backup before, a checklist after (plugin loaded, settings unchanged, each contact in its profile, cron delivery), and what each log line means.
-- **`deploy/`**: example systemd unit, backend policy and Hermes config.
+- **`deploy/`**: example systemd unit, backend policy and Hermes config, and `update-bridge.sh`, which updates the backend from a GitHub archive with automatic rollback.
 - **`create_telethon_session.sh`**: an interactive login helper, if you prefer creating the session by hand.
 
 ## Compatibility
