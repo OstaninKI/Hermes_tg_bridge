@@ -187,7 +187,7 @@ hermes config set stt.language ru             # Hermes assumes "en" otherwise; "
 hermes config set stt.echo_transcripts false  # else every transcript is posted back to the contact from your account
 ```
 
-Then select **Local Whisper** under Speech-to-Text in `hermes tools` to install faster-whisper now. Without it, Hermes installs it on the first voice message, which may need one more gateway restart.
+Then install faster-whisper now with `hermes pm install --extra stt-whisper` (or select **Local Whisper** under Speech-to-Text in `hermes tools`), and restart the gateway. Without it, Hermes installs it on the first voice message, which may need one more gateway restart.
 
 Add to `~/.hermes/.env`:
 

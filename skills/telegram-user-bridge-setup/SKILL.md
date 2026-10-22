@@ -306,14 +306,15 @@ done
 
 `stt.echo_transcripts false` matters: Hermes otherwise posts each transcript back into the chat as 🎙️ "...", which here means from the user's own account to the contact.
 
-Then install faster-whisper ahead of time, so the first voice message does not wait for it. Hermes requires this to run with the Python Hermes itself runs on, from its install directory. Both are in the `hermes` launcher, a short shell script (`cat "$(command -v hermes)"`): the interpreter is the first word after `exec`, the install directory the path in `sys.path.insert(0, ...)` (by default `~/.hermes/hermes-agent`).
+Then install faster-whisper ahead of time through Hermes' package manager, so the first voice message does not wait for it:
 
 ```bash
-cd "<install path>" && "<hermes python>" -c "import pm; pm.sync_venv(['stt-whisper'], explicit=True)"
-"<hermes python>" -c "import faster_whisper" && echo STT_OK
+hermes pm install --extra stt-whisper && hermes pm status | grep -A3 feature_list
 ```
 
-No `STT_OK`: tell the user and go on. With `stt.provider local` Hermes installs faster-whisper itself on the first voice message (`security.allow_lazy_installs`, on by default), which can need one more `/restart`; or the user runs `hermes tools` → Speech-to-Text → Local Whisper as the Hermes owner. The model itself (~150 MB for `base`) downloads from huggingface.co on first use. Record the language and `STT_OK` (or not) in the state file.
+`STT_OK` when the command succeeds and `stt-whisper` is in `feature_list`. Do not check with `python -c "import faster_whisper"`: a bare interpreter does not see PM's environment and reports the package missing when it is installed. The restart in step 8 starts the gateway on the new environment, and its voice test is the real check.
+
+Install failed: tell the user and go on. With `stt.provider local` Hermes installs faster-whisper itself on the first voice message (`security.allow_lazy_installs`, on by default), which can need one more `/restart`; or the user runs `hermes tools` → Speech-to-Text → Local Whisper as the Hermes owner. The model itself (~150 MB for `base`) downloads from huggingface.co on first use. Record the language and `STT_OK` (or not) in the state file.
 
 If Hermes runs as a **user** systemd service (`systemctl --user status hermes-gateway` works), the new group only applies after `sudo systemctl restart "user@$(id -u)"` or a reboot. Tell the user, because otherwise inbound photos and files fail to load.
 
