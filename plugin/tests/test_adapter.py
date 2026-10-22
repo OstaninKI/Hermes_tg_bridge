@@ -874,6 +874,14 @@ def test_startup_summary_reports_settings_without_the_token(monkeypatch):
         assert part in line
 
 
+def test_startup_summary_reports_the_hermes_cli_version(monkeypatch):
+    from adapter import startup_summary
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", SimpleNamespace(__version__="0.22.4"))
+
+    assert "hermes=0.22.4" in startup_summary(AdapterConfig(api_token="t"))
+
+
 def test_startup_summary_sees_home_channel_from_platform_config(monkeypatch):
     from adapter import startup_summary
 

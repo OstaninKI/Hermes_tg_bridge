@@ -9,7 +9,6 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -829,9 +828,14 @@ def _plugin_version() -> str:
 
 
 def _hermes_version() -> str:
+    # Package metadata goes stale on editable installs (it reported 0.21.4 on a
+    # 0.22.4 checkout). hermes_cli.__version__ reads the install stamp the CLI
+    # shows, and Hermes keeps it as a frozen compat surface.
     try:
-        return metadata.version("hermes-agent")
-    except metadata.PackageNotFoundError:
+        import hermes_cli
+
+        return str(hermes_cli.__version__)
+    except Exception:
         return "unknown"
 
 

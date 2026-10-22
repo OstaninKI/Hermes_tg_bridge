@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-maintenance
 description: "Check and debug hermes-tg-bridge around a Hermes update, or when the Telegram user bridge misbehaves: no replies, a reply from the wrong profile, lost settings, cron results not delivered. Backup before, checklist after, where to look in the logs."
-version: 1.0.1
+version: 1.0.2
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -88,22 +88,35 @@ grep -h "telegram_user" "$HOME/.hermes/logs/"*.log | grep -i "startup\|API chang
 
 "It answered" is not enough. Check **which profile** owns the session.
 
-Use a **unique marker per contact**, so the check does not depend on how Hermes stores sessions or ids:
+Use a **unique marker per contact**, and look for it only in each profile's **own session store** (`state.db`), not in shared files:
 
 1. Make a marker for each contact you test, for example `M=route-check-$(python3 -c 'import secrets; print(secrets.token_hex(4))')`, and write it down next to the contact.
 2. Ask the user to have that contact send a DM containing exactly the marker. Wait until the agent has replied.
-3. Find every file under `~/.hermes` that now holds the marker. This covers the SQLite databases and their `-wal` files as well as any session files, and prints only paths:
+3. List, per profile, the sessions whose messages contain the marker (read-only, prints no message text):
 
    ```bash
-   grep -rlF --exclude-dir=logs --exclude-dir=backups "$M" "$HOME/.hermes"
+   python3 - "$M" <<'EOF'
+   import glob, os, sqlite3, sys
+   m, home = sys.argv[1], os.path.expanduser("~/.hermes")
+   dbs = {"default": f"{home}/state.db"}
+   dbs.update({p.split("/")[-2]: p for p in glob.glob(f"{home}/profiles/*/state.db")})
+   for name, db in sorted(dbs.items()):
+       if not os.path.exists(db):
+           print(name, "no state.db"); continue
+       c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+       try:
+           rows = c.execute("select distinct session_id from messages where content like ?", (f"%{m}%",)).fetchall()
+       except sqlite3.Error as e:
+           print(name, "SCHEMA?", e, [t for (t,) in c.execute("select name from sqlite_master where type='table'")]); continue
+       print(name, [r[0] for r in rows] or "none")
+   EOF
    ```
 
-   A path under `profiles/<name>/` belongs to that profile. Any other path belongs to `default`.
-
-Expected: hits **only** in the contact's profile from the state file. Then:
-- **Hits in another profile, or in `default` for a routed contact:** routing broke. Check that the route still matches (`platform: telegram_user`, `user_id` as a quoted numeric string), and whether Hermes changed the `profile_routes` format in its changelog.
-- **No hits anywhere:** the message never reached a session. Check the logs below.
-- If Hermes has its own command to list sessions per profile, use it as a second check.
+Expected: a session id **only** in the contact's profile from the state file, and `none` everywhere else. Then:
+- **Session in another profile, or in `default` for a routed contact:** routing broke. Check that the route still matches (`platform: telegram_user`, `user_id` as a quoted numeric string), and whether Hermes changed the `profile_routes` format in its changelog.
+- **`none` everywhere:** the message never reached a session. Check the logs below.
+- **`SCHEMA?`:** Hermes changed its session store. Do not conclude anything: look at the printed tables, find where messages live now, and tell the user the check needs an update.
+- As a second check, open that session with Hermes' own session commands for that profile (`hermes -p <profile> ...`) and confirm it is a `telegram_user` session with that contact.
 
 To see what happened on the way, check the logs:
 
@@ -167,36 +180,70 @@ If the update broke the plugin and no plugin update exists yet: roll Hermes back
 
 ## Updating the bridge
 
-First check how `/opt/hermes-tg-bridge` was installed: `[ -d /opt/hermes-tg-bridge/.git ] && echo GIT || echo ARCHIVE`.
+The old backend tree, with its `.venv`, is kept untouched under a dated name until the new one is proven, so rollback is one `mv`. Record every path below (`OLD`, `PB`) in your reply to the user, because shell variables do not survive a restart.
 
-**GIT** (the setup skill's clone):
+**1. Get the new code and show what changes.** First check how `/opt/hermes-tg-bridge` was installed: `[ -d /opt/hermes-tg-bridge/.git ] && echo GIT || echo ARCHIVE`.
+
+- **ARCHIVE** (unpacked from a tarball):
+
+  ```bash
+  T=$(mktemp -d); curl -fsSL https://github.com/OstaninKI/Hermes_tg_bridge/archive/refs/heads/main.tar.gz | tar -xz -C "$T"
+  N="$T/Hermes_tg_bridge-main"; diff -rq --exclude=.venv --exclude=__pycache__ /opt/hermes-tg-bridge "$N"
+  ```
+
+  For a fixed version instead of `main`, use `archive/<commit or tag>.tar.gz` and the matching directory name.
+- **GIT:** `sudo git -C /opt/hermes-tg-bridge fetch && sudo git -C /opt/hermes-tg-bridge log --oneline HEAD..origin/main`.
+
+Show the user the changes and wait for their OK.
+
+**2. Swap the backend.** The service is stopped before the tree changes:
 
 ```bash
-sudo git -C /opt/hermes-tg-bridge pull --ff-only
-```
-
-**ARCHIVE** (unpacked from a release or branch tarball): download the new code into a fresh temporary directory, and show the user `diff -rq` of the old and new trees before replacing anything. The swap keeps the backend's `.venv`, and the old tree stays as a dated copy for rollback:
-
-```bash
-T=$(mktemp -d); curl -fsSL https://github.com/OstaninKI/Hermes_tg_bridge/archive/refs/heads/main.tar.gz | tar -xz -C "$T"
-N="$T/Hermes_tg_bridge-main"; diff -rq --exclude=.venv /opt/hermes-tg-bridge "$N"
-# after the user agrees:
 OLD="/opt/hermes-tg-bridge.bak-$(date +%Y%m%d-%H%M)"
-sudo cp -a /opt/hermes-tg-bridge "$OLD"
-sudo mv /opt/hermes-tg-bridge/backend/.venv "$N/backend/.venv"
-sudo rm -rf /opt/hermes-tg-bridge && sudo mv "$N" /opt/hermes-tg-bridge && sudo chown -R root:root /opt/hermes-tg-bridge
+sudo systemctl stop hermes-tg-bridge
 ```
 
-To install a fixed version instead of `main`, use `archive/<commit or tag>.tar.gz` and the matching directory name.
+- **ARCHIVE:** the old tree moves aside whole, and the new one gets a fresh `.venv`:
 
-**Then, both ways:**
+  ```bash
+  sudo mv /opt/hermes-tg-bridge "$OLD"
+  sudo mv "$N" /opt/hermes-tg-bridge && sudo chown -R root:root /opt/hermes-tg-bridge
+  sudo python3 -m venv /opt/hermes-tg-bridge/backend/.venv
+  ```
+
+- **GIT:** keep a full copy aside, then fast-forward in place:
+
+  ```bash
+  sudo cp -a /opt/hermes-tg-bridge "$OLD"
+  sudo git -C /opt/hermes-tg-bridge merge --ff-only origin/main
+  ```
+
+Then, both ways:
 
 ```bash
 sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install -q '/opt/hermes-tg-bridge/backend[fast]'
-sudo systemctl restart hermes-tg-bridge && sleep 5 && curl -s http://127.0.0.1:8765/health
-P="$HOME/.hermes/plugins/hermes-telegram-user"; cp -a "$P" "$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M)"
+sudo systemctl start hermes-tg-bridge; sleep 5; curl -s http://127.0.0.1:8765/health
+```
+
+Expect `{"status":"ok","connected":true}`. The Telegram session and state live in `/var/lib/hermes-tg-bridge` and are not touched.
+
+**Backend rollback**, if `pip` fails or health is not `ok`. The old tree goes back to its original path, so its `.venv` works again:
+
+```bash
+sudo systemctl stop hermes-tg-bridge
+sudo rm -rf /opt/hermes-tg-bridge && sudo mv "$OLD" /opt/hermes-tg-bridge
+sudo systemctl start hermes-tg-bridge; sleep 5; curl -s http://127.0.0.1:8765/health
+```
+
+**3. Swap the plugin:**
+
+```bash
+PB="$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M)"; P="$HOME/.hermes/plugins/hermes-telegram-user"
+mkdir -p "$(dirname "$PB")" && cp -a "$P" "$PB"
 rm -rf "$P" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HOME/.hermes/plugins/"
 hermes plugins doctor 2>&1 | grep -i -A3 telegram
 ```
 
-Then the user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart).
+Plugin rollback: `rm -rf "$P" && cp -a "$PB" "$P"`, then `/restart`.
+
+**4.** The user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart). Once everything passes, tell the user that `$OLD` and `$PB` can be deleted after a few days.

@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.4.2
+version: 1.4.3
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -41,7 +41,7 @@ Format:
 
 ```markdown
 # hermes-tg-bridge setup state
-skill_version: 1.4.2
+skill_version: 1.4.3
 updated: <ISO date>
 last_step_done: <0..8>
 hermes_user: <id -un>
@@ -109,7 +109,7 @@ Ask:
 - **Numeric ids only.** Routes match the numeric Telegram user id, not the @username. If the user only knows a username, ask them to get the id (for example, forward one of that person's messages to @userinfobot) or to have the person DM the account once, then read `sender_id` from `journalctl -u hermes-tg-bridge` after step 6.
 - One person, one profile. Several people may share a profile.
 - **Someone else's own Telegram account** (e.g. the wife wants an AI on her account rather than to talk to the user's): that needs a second bridge instance with its own login, which this skill does not cover. Say so and leave it out.
-- **A new profile starts clean.** It gets the same model, keys and tools as `default`, but **not** your memory, persona (`SOUL.md`) or past sessions: those hold the user's private context, and the contact could get it out of the agent by asking. For each new profile ask only:
+- **A new profile starts clean.** It gets the model `default` uses and that provider's key, but **not** your memory, persona (`SOUL.md`), past sessions or other secrets: those hold the user's private context, and the contact could get it out of the agent by asking. For each new profile ask only:
   > "How should the agent behave with `<contact>` (tone, role, anything it must know or must not do)? I'll write that as the new profile's persona."
 
   Copy the user's memory into a contact's profile only if the user asks for it on their own. Then first warn them: "`<contact>` will be able to ask the agent about anything in your memory." Record their answer as a decision.
@@ -124,10 +124,16 @@ Show the final table back and ask the user to confirm it. **Wait.** Write it and
 
 > "Open https://my.telegram.org, sign in with your phone number, go to **API development tools** and create an app (platform 'Other'; any name and short name, but no word 'Telegram' in them, e.g. 'Hermes bridge'). You'll get an **api_id** (a number) and an **api_hash** (32 hex characters).
 >
-> You can send them to me here, but they will stay in my chat history on this server. If you'd rather not, put them on this server yourself:
+> Don't send them here: the `api_hash` would stay in my chat history. Put them on this server yourself over SSH:
 > `sudo install -m 600 /dev/null /tmp/tg-api && sudo nano /tmp/tg-api` with two lines, `TELEGRAM_API_ID=...` and `TELEGRAM_API_HASH=...`, then reply 'file'."
 
-**Wait.** Validate: `api_id` is all digits, `api_hash` matches `^[0-9a-f]{32}$`. If they sent the values in chat, write them in step 4 without echoing them back.
+**Wait.** Validate the file without printing it:
+
+```bash
+sudo python3 -c 'import re; d=dict(l.strip().split("=",1) for l in open("/tmp/tg-api") if "=" in l); print("API_OK" if re.fullmatch(r"\d+", d.get("TELEGRAM_API_ID","")) and re.fullmatch(r"[0-9a-f]{32}", d.get("TELEGRAM_API_HASH","")) else "API_BAD")'
+```
+
+On `API_BAD`, ask the user to fix the file. If the user sends the values in chat anyway, do not use them: ask them to delete that message and to put the values in the file. They can also revoke the hash by creating a new app on my.telegram.org.
 
 ## Step 3. Install the code (root)
 
@@ -151,12 +157,12 @@ umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > /tmp/
 ```
 
 Write `/etc/hermes-tg-bridge/secret.env` (`root:hermes-tg`, 0640) with these keys:
-- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, from step 2 or `/tmp/tg-api`;
+- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, from `/tmp/tg-api`;
 - `TELEGRAM_BRIDGE_API_TOKEN=` followed by the contents of `/tmp/tg-bridge-token`;
 - `HERMES_QR_PASSWORD_TIMEOUT=900`, which gives the user 15 minutes for the 2FA step;
 - `TELEGRAM_DISABLE_EXTENDED_API=1`: Hermes only needs the core endpoints, and this switches the rest off.
 
-Build it with shell redirection from those files (for example `{ sudo cat /tmp/tg-api; printf 'TELEGRAM_BRIDGE_API_TOKEN=%s\n' "$(cat /tmp/tg-bridge-token)"; echo HERMES_QR_PASSWORD_TIMEOUT=900; echo TELEGRAM_DISABLE_EXTENDED_API=1; } | sudo tee /etc/hermes-tg-bridge/secret.env >/dev/null`), then `sudo chown root:hermes-tg` and `sudo chmod 0640` it. If the API values came through chat, first write them to a 0600 `/tmp/tg-api` the same way. Remove it afterwards with `sudo rm -f /tmp/tg-api`.
+Build it with shell redirection from those files (for example `{ sudo cat /tmp/tg-api; printf 'TELEGRAM_BRIDGE_API_TOKEN=%s\n' "$(cat /tmp/tg-bridge-token)"; echo HERMES_QR_PASSWORD_TIMEOUT=900; echo TELEGRAM_DISABLE_EXTENDED_API=1; } | sudo tee /etc/hermes-tg-bridge/secret.env >/dev/null`), then `sudo chown root:hermes-tg` and `sudo chmod 0640` it. Remove it afterwards with `sudo rm -f /tmp/tg-api`.
 
 Write `/etc/hermes-tg-bridge/policy.json` (`root:hermes-tg`, 0640) with **all** contacts from step 1 in both lists, plus the home channel in `write.allow` if set:
 
@@ -262,11 +268,12 @@ Add these to `$HH/.env`, replacing existing keys rather than duplicating them, a
 
 Then clean up with `rm -f /tmp/tg-bridge-token "$H"`.
 
-**New profiles**, from the table: `hermes profile create <name> --clone` copies config, `.env`, `SOUL.md`, skills and memory from `default`, without messaging channels, so the copy does not take over the user's bot. Right after creating it, before any message can reach it, remove the user's context from the copy:
-- empty every memory file and delete any sessions or `state.db` the clone brought along (list `~/.hermes/profiles/<name>/` and say what you remove);
-- replace `SOUL.md` with the persona from step 1.
+**New profiles**, from the table: `hermes profile create <name>` **without `--clone`**. A clone copies the user's memory, persona and the whole `.env` (other channels' tokens too); none of that may reach a contact's profile. Then give the empty profile only what it needs to answer:
+- **Model:** use Hermes' own command for a profile's model if it has one (`hermes -p <name> ...`). Otherwise copy only the model/provider section of `~/.hermes/config.yaml` into `~/.hermes/profiles/<name>/config.yaml`.
+- **Provider key:** only the key that model needs. Copy that one line from `~/.hermes/.env` into `~/.hermes/profiles/<name>/.env` (mode 0600) by redirection, never echoed. No bot tokens and no `HERMES_TG_*` keys.
+- **Persona:** write `~/.hermes/profiles/<name>/SOUL.md` from the answer in step 1.
 
-Skip the memory part only for a recorded decision to share it. Check `hermes profile list`. Do not install a gateway for it: the multiplexed gateway picks new profiles up.
+Copy memory files only for a recorded decision to share them. Check `hermes profile list`, and `hermes -p <name> doctor` if it exists. Do not install a gateway for it: the multiplexed gateway picks new profiles up.
 
 **Routes**, in `$HH/config.yaml`: make sure `gateway.multiplex_profiles` is `true` and add one entry per contact routed to a non-default profile, keeping any existing routes:
 
