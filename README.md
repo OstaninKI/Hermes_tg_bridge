@@ -29,7 +29,7 @@ Hermes' built-in Telegram channel needs a bot made with @BotFather, so people ha
 - **Ban-safety fuses**: a per-minute send cap and FloodWait handling, so a runaway agent cannot spam from your account.
 - **Hardened deployment**: the Telegram session lives under a separate system user; the backend listens on `127.0.0.1` only, behind a bearer token.
 - **QR login** with 2FA, no phone code to type into a server.
-- **Inbound media**: photos, voice and files are downloaded for Hermes to read.
+- **Inbound media**: photos, voice, video circles and files are downloaded for Hermes to read. Voice and circles are transcribed by Telegram itself when your account has Premium, otherwise by Hermes' own speech-to-text. Locations, shared contacts and hidden links reach the agent as text.
 - **Cron delivery**: Hermes scheduled jobs with `deliver=telegram_user` arrive from your account.
 - **Self-install**: a Hermes skill lets the agent set all of this up for you over chat.
 - **Extended API** (off by default for the gateway): history, dialogs, contacts, groups, channels, edits and forwards over HTTP.
@@ -175,7 +175,10 @@ Run these as the user that runs Hermes:
 sudo usermod -aG hermes-tg "$(id -un)"     # read inbound media; takes effect on next login/restart
 cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user ~/.hermes/plugins/
 hermes plugins enable hermes-telegram-user
+hermes config set stt.echo_transcripts false   # repeat with -p <name> for each routed profile
 ```
+
+Hermes' default posts every voice transcript back into the chat as 🎙️ "…", which here would mean from your account to the contact.
 
 Add to `~/.hermes/.env`:
 
@@ -232,7 +235,7 @@ All optional; set them in the systemd unit or `secret.env`.
 | `TELEGRAM_DM_INBOX_BACKFILL` | `unread` | Messages from before the first start: `unread`, `none` (only new), `all` (recent history) |
 | `TELEGRAM_DM_MEDIA_RETENTION_DAYS` | `7` | Delete downloaded inbound media after N days; `0` disables cleanup |
 | `HERMES_QR_PASSWORD_TIMEOUT` | `180` | Seconds the QR login waits for the 2FA password |
-| `TELEGRAM_DISABLE_EXTENDED_API` | off | `1` keeps only the endpoints the gateway needs (`/health`, `/me`, `/send_message`, `/dm/*`, `/auth/qr/*`); the rest return `404` |
+| `TELEGRAM_DISABLE_EXTENDED_API` | off | `1` keeps only the endpoints the gateway needs (`/health`, `/me`, `/send_message`, `/dm/*`, `/transcribe_voice`, `/auth/qr/*`); the rest return `404` |
 | `TELEGRAM_PROXY_TYPE` / `_HOST` / `_PORT` / `_SECRET` | — | `socks5` (needs the `[proxy]` extra) or `mtproxy` connection to Telegram. A wrong type or missing host/port stops the backend from starting; it never falls back to a direct connection |
 
 State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/telethon` if that is unset. Override them with `TELEGRAM_SESSION_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_DM_MEDIA_PATH` and `TELEGRAM_LOCK_PATH`, as the example unit does.

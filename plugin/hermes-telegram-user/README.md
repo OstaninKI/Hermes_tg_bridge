@@ -45,7 +45,9 @@ The import in `__init__.py` must stay relative (`from .adapter import register`)
 
 ## Behaviour notes
 
-- **Media.** The backend downloads attachments. The adapter copies their bytes into Hermes' media cache through `cache_media_bytes` and sets `media_urls`/`media_types`, so the file is visible to the agent, including vision tools. Files over 100 MB are skipped and logged.
+- **Media.** The backend downloads attachments. The adapter copies their bytes into Hermes' media cache through `cache_media_bytes` and sets `media_urls`/`media_types`, so Hermes routes them as usual: images to vision, voice to its speech-to-text, video and files as paths the agent can open. Files over 100 MB are skipped and logged.
+- **Voice and video circles.** When the event has `can_transcribe` (the account has Premium), the adapter asks the backend's `/transcribe_voice` first and passes the transcript as a bare quoted line, Hermes' own STT format; a voice note then goes as text without its audio. Without a transcript, voice goes to Hermes' STT, and a circle is listed twice, as video and as `audio/mp4`, so Hermes transcribes its speech too. Set `stt.echo_transcripts: false` in Hermes, or every transcript is posted back to the contact from the owner's account.
+- **Location, contacts, links.** A location uses Hermes' native Telegram text (coordinates, venue, map link). A shared contact and each hidden link (`text_url`) are appended as `[Telegram contact | …]` and `[Telegram link | …]`. A sender typing `[Telegram …` or `[The user …` sees it rewritten to `[TG …`, so they cannot forge these lines.
 - **Failing messages.** If Hermes does not accept a message (`handle_message` raises), it is retried up to 10 times, then acknowledged anyway so the queue keeps moving. Events filtered out by `allow_from` are acknowledged too; otherwise the backend would return them on every poll forever.
 - **Duplicate sends.** Every `send()` carries an `Idempotency-Key` that is stable across retries of the same message within 120 seconds, so a retry after a client timeout never delivers twice.
 - **Send errors.** `SendResult` carries `retryable`, `retry_after` and `error_kind`, so Hermes decides whether to retry and how long to wait.
@@ -55,4 +57,4 @@ The import in `__init__.py` must stay relative (`from .adapter import register`)
 Run the tests from the `plugin/` directory:
 
 - `python -m pytest`: runs against a small shim of the Hermes gateway API.
-- `PYTHONPATH=<hermes-agent checkout> python -m pytest`: runs the same suite against the real gateway; the Hermes checkout's dependencies must be installed.
+- `PYTHONPATH=<hermes-agent checkout> python -m pytest`: runs the same suite against the real gateway, including a check that media lands where Hermes' own classifier routes it. Use Python 3.14 with the checkout's `pyproject.toml` dependencies installed; set `HOME` to a scratch directory, since Hermes writes its media cache there.
