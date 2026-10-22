@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.4.1
+version: 1.4.2
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -41,7 +41,7 @@ Format:
 
 ```markdown
 # hermes-tg-bridge setup state
-skill_version: 1.4.1
+skill_version: 1.4.2
 updated: <ISO date>
 last_step_done: <0..8>
 hermes_user: <id -un>
@@ -109,8 +109,10 @@ Ask:
 - **Numeric ids only.** Routes match the numeric Telegram user id, not the @username. If the user only knows a username, ask them to get the id (for example, forward one of that person's messages to @userinfobot) or to have the person DM the account once, then read `sender_id` from `journalctl -u hermes-tg-bridge` after step 6.
 - One person, one profile. Several people may share a profile.
 - **Someone else's own Telegram account** (e.g. the wife wants an AI on her account rather than to talk to the user's): that needs a second bridge instance with its own login, which this skill does not cover. Say so and leave it out.
-- For each **new** profile ask:
-  > "Should the new profile `<name>` start as a copy of `default` (same model, keys and tools, **and also its memory and persona**) or as a copy without memory? I'll clear the memory files in the second case."
+- **A new profile starts clean.** It gets the same model, keys and tools as `default`, but **not** your memory, persona (`SOUL.md`) or past sessions: those hold the user's private context, and the contact could get it out of the agent by asking. For each new profile ask only:
+  > "How should the agent behave with `<contact>` (tone, role, anything it must know or must not do)? I'll write that as the new profile's persona."
+
+  Copy the user's memory into a contact's profile only if the user asks for it on their own. Then first warn them: "`<contact>` will be able to ask the agent about anything in your memory." Record their answer as a decision.
 
 Optionally ask:
 
@@ -211,13 +213,19 @@ Reply with the image as `MEDIA:<Q>` and:
 
 - **`done`:** go to step 7.
 - **`awaiting_scan`:** the code rotated or wasn't scanned. Fetch `/auth/qr` again (without `start`), send the fresh image, and wait again. After 3 tries, offer the fallback below.
-- **`awaiting_password`:** the account has 2FA. Ask:
-  > "Your account has a cloud password (2FA). Send it here and I'll submit it. It will stay in my chat history on this server, so delete the message afterwards and consider changing the password later. Or submit it yourself over SSH:
-  > `curl -s -X POST -H 'Authorization: Bearer <token from /etc/hermes-tg-bridge/secret.env>' -H 'Content-Type: application/json' -d '{"password":"..."}' http://127.0.0.1:8765/auth/qr/2fa`
-  > then reply 'done'."
+- **`awaiting_password`:** the account has 2FA. **Never ask for the 2FA password in chat**: it would stay in the chat history on this server and in Telegram. The user types it into a hidden prompt over SSH. Send them this command and ask them to reply 'done':
+  > "Your account has a cloud password (2FA). Don't send it here. Run this on the server over SSH; it asks for the password without showing it, and it reads the bridge token itself:"
 
-  **Wait.** If they sent it, submit it with a JSON body read from stdin, never as a command-line argument:
-  `python3 -c 'import json,sys; print(json.dumps({"password": sys.stdin.read().rstrip("\n")}))' <<'EOF' | curl -s -X POST -H @"$H" -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8765/auth/qr/2fa` with the password on the heredoc line. Do not repeat it in your reply. Then poll the status for up to 20 s.
+  ```bash
+  sudo python3 -c 'import getpass, json, urllib.request as u
+  t = next(l.split("=", 1)[1].strip() for l in open("/etc/hermes-tg-bridge/secret.env") if l.startswith("TELEGRAM_BRIDGE_API_TOKEN="))
+  body = json.dumps({"password": getpass.getpass("Telegram 2FA password: ")}).encode()
+  r = u.Request("http://127.0.0.1:8765/auth/qr/2fa", body, {"Authorization": "Bearer " + t, "Content-Type": "application/json"})
+  try: print(u.urlopen(r).read().decode())
+  except u.HTTPError as e: print(e.code, e.read().decode())'
+  ```
+
+  **Wait.** Then poll the status for up to 20 s. If the user sends the password in chat anyway, do not use it: ask them to delete that message, to consider changing the password, and to run the command above.
 - **`error`:** show the error.
   - `api_id/api_hash ... invalid`: go back to step 2.
   - A wrong password: ask again.
@@ -254,7 +262,11 @@ Add these to `$HH/.env`, replacing existing keys rather than duplicating them, a
 
 Then clean up with `rm -f /tmp/tg-bridge-token "$H"`.
 
-**New profiles**, from the table: `hermes profile create <name> --clone` (copies config, `.env`, `SOUL.md`, skills and memory from `default`, without messaging channels, so the copy does not take over the user's bot). If the user chose no memory, list `~/.hermes/profiles/<name>/`, show the user which memory files you will empty, and empty them after they agree. Check `hermes profile list`. Do not install a gateway for it: the multiplexed gateway picks new profiles up.
+**New profiles**, from the table: `hermes profile create <name> --clone` copies config, `.env`, `SOUL.md`, skills and memory from `default`, without messaging channels, so the copy does not take over the user's bot. Right after creating it, before any message can reach it, remove the user's context from the copy:
+- empty every memory file and delete any sessions or `state.db` the clone brought along (list `~/.hermes/profiles/<name>/` and say what you remove);
+- replace `SOUL.md` with the persona from step 1.
+
+Skip the memory part only for a recorded decision to share it. Check `hermes profile list`. Do not install a gateway for it: the multiplexed gateway picks new profiles up.
 
 **Routes**, in `$HH/config.yaml`: make sure `gateway.multiplex_profiles` is `true` and add one entry per contact routed to a non-default profile, keeping any existing routes:
 

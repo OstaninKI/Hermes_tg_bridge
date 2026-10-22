@@ -601,7 +601,7 @@ class TelegramUserAdapter(BasePlatformAdapter):
             self.adapter_config.bridge_url, is_reconnect,
         )
         if not is_reconnect:
-            logger.info("[telegram_user] startup %s", startup_summary(self.adapter_config, health))
+            logger.info("[telegram_user] startup %s", startup_summary(self.adapter_config, health, self.config))
         return True
 
     async def disconnect(self) -> None:
@@ -835,7 +835,21 @@ def _hermes_version() -> str:
         return "unknown"
 
 
-def startup_summary(config: AdapterConfig, health: Any = None) -> str:
+def _home_channel_source(platform_config: Any) -> str:
+    """Where the platform's default cron recipient comes from.
+
+    Cron jobs that name their own recipient (for example per profile) are not
+    visible here, so "none" does not mean cron delivery is unconfigured.
+    """
+    if os.getenv(HOME_CHANNEL_ENV, "").strip():
+        return "env"
+    extra = getattr(platform_config, "extra", None) or {}
+    if getattr(platform_config, "home_channel", None) or extra.get("home_channel"):
+        return "config"
+    return "none"
+
+
+def startup_summary(config: AdapterConfig, health: Any = None, platform_config: Any = None) -> str:
     """One greppable line of what this process runs with, without secrets.
 
     Diff it before/after a Hermes update to see what changed under the bridge.
@@ -851,7 +865,7 @@ def startup_summary(config: AdapterConfig, health: Any = None) -> str:
         "policy": config.policy_profile,
         "allowed_users": len(config.allow_from),
         "allow_all": config.allow_all_users,
-        "home_channel_set": bool(os.getenv(HOME_CHANNEL_ENV, "").strip()),
+        "home_channel": _home_channel_source(platform_config),
         "mark_read": config.mark_read_on_inbound,
         "typing": config.typing_while_replying,
     }

@@ -869,9 +869,22 @@ def test_startup_summary_reports_settings_without_the_token(monkeypatch):
     assert "s3cret-token" not in line
     for part in (
         "plugin=0.1.0", "hermes_home=/home/u/.hermes/profiles/wife", "bridge_status=ok",
-        "token_set=True", "allowed_users=2", "home_channel_set=True",
+        "token_set=True", "allowed_users=2", "home_channel=env",
     ):
         assert part in line
+
+
+def test_startup_summary_sees_home_channel_from_platform_config(monkeypatch):
+    from adapter import startup_summary
+
+    monkeypatch.delenv("HERMES_TG_HOME_CHANNEL", raising=False)
+    config = AdapterConfig(api_token="t")
+
+    assert "home_channel=none" in startup_summary(config)
+    from_config = SimpleNamespace(extra={}, home_channel={"chat_id": "42", "name": "Home"})
+    assert "home_channel=config" in startup_summary(config, platform_config=from_config)
+    from_extra = PlatformConfig(extra={"home_channel": {"chat_id": "42"}})
+    assert "home_channel=config" in startup_summary(config, platform_config=from_extra)
 
 
 def test_plugin_refuses_to_load_on_a_changed_hermes_api(monkeypatch):

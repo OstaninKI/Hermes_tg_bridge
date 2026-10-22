@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-maintenance
 description: "Check and debug hermes-tg-bridge around a Hermes update, or when the Telegram user bridge misbehaves: no replies, a reply from the wrong profile, lost settings, cron results not delivered. Backup before, checklist after, where to look in the logs."
-version: 1.0.0
+version: 1.0.1
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -81,28 +81,37 @@ grep -h "telegram_user" "$HOME/.hermes/logs/"*.log | grep -i "startup\|API chang
 
 - `API changed, plugin needs an update`: the update renamed or removed something the plugin uses. The plugin refuses to load on purpose. Tell the user; the fix is a plugin update or a Hermes rollback.
 - No `startup` line since the restart: the plugin did not start. Check `hermes plugins list` and the gateway log around the restart.
-- Compare the new `startup` line with `$B/startup-line.txt` field by field. Any change in `hermes_home`, `token_set`, `allowed_users`, `allow_all`, `home_channel_set`, `policy`, `mark_read` or `typing`, other than `hermes=`, means Hermes now loads config or `.env` differently. Show the user the diff.
+- Compare the new `startup` line with `$B/startup-line.txt` field by field. Any change in `hermes_home`, `token_set`, `allowed_users`, `allow_all`, `home_channel`, `policy`, `mark_read` or `typing`, other than `hermes=`, means Hermes now loads config or `.env` differently. Show the user the diff. `home_channel=none` alone is normal when cron jobs name their own recipients (for example per profile): the plugin cannot see those.
 - Also diff the configs: `diff "$B/config.yaml" "$HOME/.hermes/config.yaml"`, especially `gateway.multiplex_profiles`, `gateway.profile_routes` and the settings that control quiet mode and intermediate messages.
 
 ### 3. Routing: each contact lands in its profile
 
 "It answered" is not enough. Check **which profile** owns the session.
 
-For each profile in the state file, count lines mentioning the contact's numeric id in that profile's `state.db` (read-only, prints only a number):
+Use a **unique marker per contact**, so the check does not depend on how Hermes stores sessions or ids:
 
-```bash
-count() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True); print(sum(sys.argv[2] in l for l in c.iterdump()))' "$1" "$2"; }
-count "$HOME/.hermes/state.db" <id>                         # default
-count "$HOME/.hermes/profiles/<profile>/state.db" <id>       # routed profile
-```
+1. Make a marker for each contact you test, for example `M=route-check-$(python3 -c 'import secrets; print(secrets.token_hex(4))')`, and write it down next to the contact.
+2. Ask the user to have that contact send a DM containing exactly the marker. Wait until the agent has replied.
+3. Find every file under `~/.hermes` that now holds the marker. This covers the SQLite databases and their `-wal` files as well as any session files, and prints only paths:
 
-Then ask one contact per profile to send a DM. Watch:
+   ```bash
+   grep -rlF --exclude-dir=logs --exclude-dir=backups "$M" "$HOME/.hermes"
+   ```
+
+   A path under `profiles/<name>/` belongs to that profile. Any other path belongs to `default`.
+
+Expected: hits **only** in the contact's profile from the state file. Then:
+- **Hits in another profile, or in `default` for a routed contact:** routing broke. Check that the route still matches (`platform: telegram_user`, `user_id` as a quoted numeric string), and whether Hermes changed the `profile_routes` format in its changelog.
+- **No hits anywhere:** the message never reached a session. Check the logs below.
+- If Hermes has its own command to list sessions per profile, use it as a second check.
+
+To see what happened on the way, check the logs:
 
 ```bash
 grep -h "\[telegram_user\] inbound\|\[telegram_user\] sent to\|profile_route" "$HOME/.hermes/logs/"*.log | tail -20
 ```
 
-Expected: `inbound ('<id>', '<msg>') handed to Hermes`, then `sent to <id>`. Re-run `count`: it must grow **only** in the contact's own profile. If it grew in `default` instead, routing broke: check that the route still matches (`platform: telegram_user`, `user_id` as a quoted numeric string) and whether Hermes changed the `profile_routes` format in its changelog.
+Expected: `inbound ('<id>', '<msg>') handed to Hermes`, then `sent to <id>`.
 
 ### 4. Access control
 
@@ -158,11 +167,36 @@ If the update broke the plugin and no plugin update exists yet: roll Hermes back
 
 ## Updating the bridge
 
+First check how `/opt/hermes-tg-bridge` was installed: `[ -d /opt/hermes-tg-bridge/.git ] && echo GIT || echo ARCHIVE`.
+
+**GIT** (the setup skill's clone):
+
 ```bash
 sudo git -C /opt/hermes-tg-bridge pull --ff-only
+```
+
+**ARCHIVE** (unpacked from a release or branch tarball): download the new code into a fresh temporary directory, and show the user `diff -rq` of the old and new trees before replacing anything. The swap keeps the backend's `.venv`, and the old tree stays as a dated copy for rollback:
+
+```bash
+T=$(mktemp -d); curl -fsSL https://github.com/OstaninKI/Hermes_tg_bridge/archive/refs/heads/main.tar.gz | tar -xz -C "$T"
+N="$T/Hermes_tg_bridge-main"; diff -rq --exclude=.venv /opt/hermes-tg-bridge "$N"
+# after the user agrees:
+OLD="/opt/hermes-tg-bridge.bak-$(date +%Y%m%d-%H%M)"
+sudo cp -a /opt/hermes-tg-bridge "$OLD"
+sudo mv /opt/hermes-tg-bridge/backend/.venv "$N/backend/.venv"
+sudo rm -rf /opt/hermes-tg-bridge && sudo mv "$N" /opt/hermes-tg-bridge && sudo chown -R root:root /opt/hermes-tg-bridge
+```
+
+To install a fixed version instead of `main`, use `archive/<commit or tag>.tar.gz` and the matching directory name.
+
+**Then, both ways:**
+
+```bash
 sudo /opt/hermes-tg-bridge/backend/.venv/bin/pip install -q '/opt/hermes-tg-bridge/backend[fast]'
-sudo systemctl restart hermes-tg-bridge
-rm -rf "$HOME/.hermes/plugins/hermes-telegram-user" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HOME/.hermes/plugins/"
+sudo systemctl restart hermes-tg-bridge && sleep 5 && curl -s http://127.0.0.1:8765/health
+P="$HOME/.hermes/plugins/hermes-telegram-user"; cp -a "$P" "$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M)"
+rm -rf "$P" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$HOME/.hermes/plugins/"
+hermes plugins doctor 2>&1 | grep -i -A3 telegram
 ```
 
 Then the user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart).
