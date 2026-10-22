@@ -403,6 +403,17 @@ class BridgeClient:
         response.raise_for_status()
         return response.json()
 
+    async def transcribe_voice(self, peer: Any, message_id: int) -> Any:
+        # The backend may wait up to 30s for Telegram's async transcription.
+        response = await self.client.post(
+            "/transcribe_voice",
+            json={"peer": peer, "message_id": message_id},
+            headers=self.headers,
+            timeout=self.write_timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def ack(self, event: dict[str, Any]) -> Any:
         return await self._post_dm_state("/dm/inbox/ack", event)
 
@@ -665,6 +676,19 @@ class TelegramUserAdapter(BasePlatformAdapter):
                 self._event_key(event), reason, exc_info=True,
             )
 
+    async def _transcribe(self, event: dict[str, Any]) -> str:
+        """Telegram Premium speech recognition; "" means fall back to Hermes' own STT."""
+        if event.get("can_transcribe") is not True:
+            return ""
+        try:
+            result = await self.bridge.transcribe_voice(event["sender_id"], int(event["id"]))
+        except Exception:
+            logger.warning("[telegram_user] transcription failed for %s", self._event_key(event), exc_info=True)
+            return ""
+        if not isinstance(result, dict) or not result.get("ok"):
+            return ""
+        return str(result.get("text") or "").strip()
+
     async def _handle_inbound_event(self, event: dict[str, Any]) -> None:
         key = self._event_key(event)
         if not self._sender_allowed(event):
@@ -674,7 +698,14 @@ class TelegramUserAdapter(BasePlatformAdapter):
 
         try:
             message = self.event_to_message(event)
-            await self._attach_media(event, message)
+            transcript = await self._transcribe(event)
+            if transcript:
+                message.text = f"[Voice message transcript]: {transcript}"
+            if transcript and event.get("is_voice_note"):
+                # Already text: handing Hermes the audio too would rerun its own STT.
+                message.message_type = MessageType.TEXT
+            else:
+                await self._attach_media(event, message)
             await self.handle_message(message)
             await self.bridge.ack(event)
             logger.info("[telegram_user] inbound %s handed to Hermes", key)

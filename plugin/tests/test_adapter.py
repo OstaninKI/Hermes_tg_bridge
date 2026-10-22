@@ -924,3 +924,34 @@ def test_register_names_the_plugin_when_register_platform_rejects_an_argument():
 
     with pytest.raises(TypeError, match="register_platform\\(\\) API changed"):
         register(OldCtx())
+
+
+def test_premium_transcript_replaces_voice_and_falls_back_on_failure():
+    class TranscribingBridge(RecordingBridge):
+        async def transcribe_voice(self, peer, message_id):
+            self.calls.append(("transcribe", message_id))
+            if message_id == 2:
+                return {"ok": False, "error": "transcription_unavailable"}
+            return {"ok": True, "text": " привет "}
+
+    bridge = TranscribingBridge()
+    adapter = TelegramUserAdapter(AdapterConfig(allow_from=["1"]), bridge=bridge)
+    seen: list[MessageEvent] = []
+
+    async def handle_message(message):
+        seen.append(message)
+
+    adapter._message_handler = handle_message
+    voice = {"sender_id": "1", "has_media": True, "mime_type": "audio/ogg", "is_voice_note": True}
+
+    async def run():
+        await adapter._handle_inbound_event({**voice, "id": 1, "can_transcribe": True})
+        await adapter._handle_inbound_event({**voice, "id": 2, "can_transcribe": True})
+        await adapter._handle_inbound_event({**voice, "id": 3})
+
+    asyncio.run(run())
+
+    assert seen[0].text == "[Voice message transcript]: привет"
+    assert seen[0].message_type == MessageType.TEXT
+    assert [m.message_type for m in seen[1:]] == [MessageType.VOICE, MessageType.VOICE]
+    assert ("transcribe", 3) not in bridge.calls
