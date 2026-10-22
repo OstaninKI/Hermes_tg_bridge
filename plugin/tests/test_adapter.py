@@ -950,13 +950,20 @@ def test_premium_transcript_replaces_voice_and_falls_back_on_failure():
         await adapter._handle_inbound_event({**voice, "id": 1, "can_transcribe": True})
         await adapter._handle_inbound_event({**voice, "id": 2, "can_transcribe": True})
         await adapter._handle_inbound_event({**voice, "id": 3})
+        await adapter._handle_inbound_event({
+            "sender_id": "1", "id": 4, "has_media": True, "mime_type": "video/mp4",
+            "is_video_note": True, "can_transcribe": True,
+        })
 
     asyncio.run(run())
 
-    assert seen[0].text == "\"привет\""
+    # The marker tells a session that once heard "transcription is not configured" that this one worked.
+    assert seen[0].text == '[Telegram voice message, transcribed successfully. Reply to what it says.]\n"привет"'
     assert seen[0].message_type == MessageType.TEXT
-    assert [m.message_type for m in seen[1:]] == [MessageType.VOICE, MessageType.VOICE]
+    assert [m.message_type for m in seen[1:3]] == [MessageType.VOICE, MessageType.VOICE]
     assert ("transcribe", 3) not in bridge.calls
+    assert seen[3].text.startswith("[Telegram video circle, transcribed successfully.")
+    assert seen[3].message_type == MessageType.VIDEO
 
 
 def test_event_to_message_adds_location_contact_and_link_hints():

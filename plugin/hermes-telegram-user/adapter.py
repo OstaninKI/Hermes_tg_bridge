@@ -757,9 +757,13 @@ class TelegramUserAdapter(BasePlatformAdapter):
             message = self.event_to_message(event)
             transcript = await self._transcribe(event)
             if transcript:
-                # Hermes' own STT format (gateway/run_inbound_transcription.py): a bare quoted
-                # line, since a "user sent a voice message" wrapper makes the model talk about voice.
-                message.text = f'"{transcript}"'
+                # Hermes' own STT passes a bare quoted line (gateway/run_inbound_transcription.py),
+                # but then a session that earlier saw "speech recognition is not configured" kept
+                # acting on that. So state the outcome; "reply to what it says" keeps the model off
+                # the voice-mode commentary Hermes dropped its wrapper over. The "[Telegram" prefix
+                # is one a sender cannot forge (see event_to_message).
+                kind = "video circle" if event.get("is_video_note") else "voice message"
+                message.text = f'[Telegram {kind}, transcribed successfully. Reply to what it says.]\n"{transcript}"'
             if transcript and event.get("is_voice_note"):
                 # Already text: handing Hermes the audio would rerun its STT, and VOICE would ask
                 # for a spoken reply this adapter cannot send.
