@@ -221,3 +221,21 @@ class TestExtendedApiGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(DmInboxBroker is None, "fastapi is not installed in this test environment")
+class TestInboundDmPremiumFlag(unittest.IsolatedAsyncioTestCase):
+    async def test_premium_reaches_serializer(self):
+        from types import SimpleNamespace
+
+        from hermes_tg_bridge import server
+
+        bridge = SimpleNamespace(_is_premium=True, observe_peer_entity=lambda *a, **k: None)
+        broker = SimpleNamespace(push=AsyncMock())
+        message = SimpleNamespace(out=False, sender=SimpleNamespace(id=1))
+        event = SimpleNamespace(is_private=True, message=message)
+        with patch.object(server, "_bridge", bridge), patch.object(server, "_dm_broker", broker), \
+                patch.object(server, "_serialize_message", return_value={"sender_id": 1}) as serialize:
+            await server._on_new_dm(event)
+        self.assertIs(serialize.call_args.kwargs["premium"], True)
+        broker.push.assert_awaited_once()

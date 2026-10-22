@@ -421,7 +421,12 @@ async def _on_new_dm(event: Any) -> None:
                 sender = None
             if sender is not None:
                 break
-    payload = _serialize_message(message, entity=sender or getattr(event, "chat", None))
+    # premium sets can_transcribe, which the plugin needs to try Telegram's own speech recognition.
+    payload = _serialize_message(
+        message,
+        entity=sender or getattr(event, "chat", None),
+        premium=getattr(bridge, "_is_premium", None),
+    )
     payload["chat_type"] = "direct"
     if payload.get("chat_title") is None:
         payload["chat_title"] = payload.get("sender_name")
@@ -529,6 +534,8 @@ CORE_API_PATHS = frozenset(
         "/dm/inbox/ack",
         "/dm/read",
         "/dm/typing",
+        # The plugin's Premium speech recognition; scoped to the read allowlist like the inbox.
+        "/transcribe_voice",
         "/auth/qr",
         "/auth/qr/start",
         "/auth/qr/status",

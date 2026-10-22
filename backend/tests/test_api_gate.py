@@ -105,6 +105,34 @@ class TestExtendedApiGate(unittest.TestCase):
         response = client.post("/send_message", json={"peer": "1", "text": "hi"}, headers=auth)
         self.assertNotEqual(response.status_code, 404)
 
+    def test_transcribe_voice_works_when_disabled_and_keeps_auth_and_read_scope(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from hermes_tg_bridge.client import BridgeClient
+        from hermes_tg_bridge.config import PolicyStore
+
+        client, server = _client(extended_disabled=True)
+        telegram = AsyncMock(return_value=SimpleNamespace(pending=False, text="hello"))
+        telegram.is_connected = MagicMock(return_value=True)
+        telegram.get_entity = AsyncMock(side_effect=lambda peer: SimpleNamespace(id=int(peer)))
+        bridge = BridgeClient(telegram, reply_delay_sec=0, rpc_timeout_sec=5, flood_wait_max_sleep_sec=0)
+        bridge._is_premium = True
+        server._bridge = bridge
+        server._policy_store = PolicyStore(None)
+        headers = {"Authorization": "Bearer secret-token", "X-Hermes-Allow-From": "111"}
+
+        allowed = client.post("/transcribe_voice", json={"peer": "111", "message_id": 5}, headers=headers)
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual(allowed.json(), {"ok": True, "text": "hello"})
+
+        no_auth = client.post("/transcribe_voice", json={"peer": "111", "message_id": 5})
+        self.assertEqual(no_auth.status_code, 401)
+
+        foreign = client.post("/transcribe_voice", json={"peer": "222", "message_id": 5}, headers=headers)
+        self.assertEqual(foreign.status_code, 403, foreign.text)
+        self.assertEqual(telegram.await_count, 1)  # only the allowed peer reached Telegram
+
     def test_privileged_endpoints_reachable_when_extended_api_is_on(self) -> None:
         client, _ = _client(extended_disabled=False)
         auth = {"Authorization": "Bearer secret-token"}
