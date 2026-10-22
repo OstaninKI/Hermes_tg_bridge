@@ -82,7 +82,7 @@ grep -h "telegram_user" "$HOME/.hermes/logs/"*.log | grep -i "startup\|API chang
 - `API changed, plugin needs an update`: the update renamed or removed something the plugin uses. The plugin refuses to load on purpose. Tell the user; the fix is a plugin update or a Hermes rollback.
 - No `startup` line since the restart: the plugin did not start. Check `hermes plugins list` and the gateway log around the restart.
 - Compare the new `startup` line with `$B/startup-line.txt` field by field. Any change in `hermes_home`, `token_set`, `allowed_users`, `allow_all`, `home_channel`, `policy`, `mark_read` or `typing`, other than `hermes=`, means Hermes now loads config or `.env` differently. Show the user the diff. `home_channel=none` alone is normal when cron jobs name their own recipients (for example per profile): the plugin cannot see those.
-- Also diff the configs: `diff "$B/config.yaml" "$HOME/.hermes/config.yaml"`, especially `gateway.multiplex_profiles`, `gateway.profile_routes`, `stt.echo_transcripts` (must stay `false`, or voice transcripts go back to contacts from the user's account) and the settings that control quiet mode and intermediate messages.
+- Also diff the configs: `diff "$B/config.yaml" "$HOME/.hermes/config.yaml"`, especially `gateway.multiplex_profiles`, `gateway.profile_routes`, `stt.echo_transcripts` (must stay `false`, or voice transcripts go back to contacts from the user's account), `stt.provider` (`local`) and `stt.language` and the settings that control quiet mode and intermediate messages.
 
 ### 3. Routing: each contact lands in its profile
 
@@ -219,6 +219,6 @@ hermes plugins doctor 2>&1 | grep -i -A3 telegram
 
 Plugin rollback: `mv "$P" "$PB.failed" && mv "$PB" "$P"`, then `/restart`.
 
-Installs from before this setting existed still post voice transcripts back to contacts. Check `hermes -p <profile> config get stt.echo_transcripts` for the default profile and every routed one, and set it to `false` where it is not.
+Installs from before these settings existed may post voice transcripts back to contacts, or have no speech-to-text when Telegram Premium is unavailable. For the default profile and every routed one, `hermes -p <profile> config get` each of `stt.echo_transcripts` (`false`), `stt.provider` (`local`) and `stt.language` (the contacts' language; Hermes defaults to `en`). Anything missing: apply the speech-to-text block of the setup skill's step 7, faster-whisper install included.
 
 **4.** The user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart). Once everything passes, tell the user which old copies they can remove themselves after a few days: `/opt/hermes-tg-bridge.bak-*`, `/opt/hermes-tg-bridge.failed-*`, the plugin backup and `$T`.

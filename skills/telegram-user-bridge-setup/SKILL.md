@@ -118,6 +118,8 @@ Optionally ask:
 
 > "Should scheduled (cron) results go to one of them, or to someone else? Send a numeric id or 'no'."
 
+Ask which language these contacts speak in voice messages, offering the language of this chat as the default. Hermes' speech-to-text assumes English unless told otherwise; for contacts who mix languages, use auto-detect (`""`), which is less reliable on short clips.
+
 Show the final table back and ask the user to confirm it. **Wait.** Write it and the answers to the state file.
 
 ## Step 2. Telegram API credentials (user action)
@@ -290,7 +292,28 @@ gateway:
 
 Re-read the file to check it is valid YAML and that each `profile` exists. Mark each contact `routed` in the state file.
 
-**Transcript echo off**, in the default profile and every routed one: `hermes -p <profile> config set stt.echo_transcripts false`. Hermes otherwise posts each voice transcript back into the chat as 🎙️ "...", which here means from the user's own account to the contact.
+**Speech-to-text.** Voice messages and video circles are transcribed by Telegram when the account has Premium. Without Premium, or when Telegram fails, the plugin hands the audio to Hermes, so Hermes needs its own speech-to-text: local faster-whisper, offline, no API key, no audio sent anywhere. In the default profile and every routed one (`<lang>` from step 1, e.g. `ru`):
+
+```bash
+for p in default <routed profiles>; do
+  hermes -p "$p" config set stt.enabled true
+  hermes -p "$p" config set stt.provider local        # explicit: Hermes never switches to a cloud STT on its own
+  hermes -p "$p" config set stt.local.model base      # ~150 MB, fine on CPU; small/medium for better accuracy
+  hermes -p "$p" config set stt.language "<lang>"     # Hermes defaults to "en"
+  hermes -p "$p" config set stt.echo_transcripts false
+done
+```
+
+`stt.echo_transcripts false` matters: Hermes otherwise posts each transcript back into the chat as 🎙️ "...", which here means from the user's own account to the contact.
+
+Then install faster-whisper ahead of time, so the first voice message does not wait for it. Hermes requires this to run with the Python Hermes itself runs on, from its install directory. Both are in the `hermes` launcher, a short shell script (`cat "$(command -v hermes)"`): the interpreter is the first word after `exec`, the install directory the path in `sys.path.insert(0, ...)` (by default `~/.hermes/hermes-agent`).
+
+```bash
+cd "<install path>" && "<hermes python>" -c "import pm; pm.sync_venv(['stt-whisper'], explicit=True)"
+"<hermes python>" -c "import faster_whisper" && echo STT_OK
+```
+
+No `STT_OK`: tell the user and go on. With `stt.provider local` Hermes installs faster-whisper itself on the first voice message (`security.allow_lazy_installs`, on by default), which can need one more `/restart`; or the user runs `hermes tools` → Speech-to-Text → Local Whisper as the Hermes owner. The model itself (~150 MB for `base`) downloads from huggingface.co on first use. Record the language and `STT_OK` (or not) in the state file.
 
 If Hermes runs as a **user** systemd service (`systemctl --user status hermes-gateway` works), the new group only applies after `sudo systemctl restart "user@$(id -u)"` or a reboot. Tell the user, because otherwise inbound photos and files fail to load.
 
@@ -307,9 +330,10 @@ grep -i "telegram_user\|Telegram User\|profile_route" "$HOME/.hermes/logs/"*.log
 
 Look for the platform being connected and for no `bridge_unauthorized` or `bridge_unavailable` errors. Then:
 
-> "Ask one contact per profile to send a DM to your account. Each should get a reply from your account within a few seconds, from the agent of their profile."
+> "Ask one contact per profile to send a DM to your account. Each should get a reply from your account within a few seconds, from the agent of their profile. Ask one of them to also send a short voice message: the reply should answer what they said."
 
 **Wait** for confirmation. On failure:
+- a voice message answered as if not understood: `grep -i "transcri\|whisper" "$HOME/.hermes/logs/"*.log | tail`, then `stt.provider`, `stt.language` and faster-whisper from step 7;
 - `journalctl -u hermes-tg-bridge -n 50`;
 - the Hermes logs;
 - whether the sender's id is in both `policy.json` and `HERMES_TG_ALLOWED_USERS`;

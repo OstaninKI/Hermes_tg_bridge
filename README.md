@@ -29,7 +29,7 @@ Hermes' built-in Telegram channel needs a bot made with @BotFather, so people ha
 - **Ban-safety fuses**: a per-minute send cap and FloodWait handling, so a runaway agent cannot spam from your account.
 - **Hardened deployment**: the Telegram session lives under a separate system user; the backend listens on `127.0.0.1` only, behind a bearer token.
 - **QR login** with 2FA, no phone code to type into a server.
-- **Inbound media**: photos, voice, video circles and files are downloaded for Hermes to read. Voice and circles are transcribed by Telegram itself when your account has Premium, otherwise by Hermes' own speech-to-text. Locations, shared contacts and hidden links reach the agent as text.
+- **Inbound media**: photos, voice, video circles and files are downloaded for Hermes to read. Voice and circles are transcribed by Telegram itself when your account has Premium, otherwise by Hermes' local speech-to-text (faster-whisper, offline). Locations, shared contacts and hidden links reach the agent as text.
 - **Cron delivery**: Hermes scheduled jobs with `deliver=telegram_user` arrive from your account.
 - **Self-install**: a Hermes skill lets the agent set all of this up for you over chat.
 - **Extended API** (off by default for the gateway): history, dialogs, contacts, groups, channels, edits and forwards over HTTP.
@@ -175,10 +175,19 @@ Run these as the user that runs Hermes:
 sudo usermod -aG hermes-tg "$(id -un)"     # read inbound media; takes effect on next login/restart
 cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user ~/.hermes/plugins/
 hermes plugins enable hermes-telegram-user
-hermes config set stt.echo_transcripts false   # repeat with -p <name> for each routed profile
 ```
 
-Hermes' default posts every voice transcript back into the chat as 🎙️ "…", which here would mean from your account to the contact.
+Voice messages and video circles are transcribed by Telegram when your account has Premium. Otherwise the plugin hands the audio to Hermes, so give Hermes a local speech-to-text (faster-whisper: offline, no API key). Run this for the default profile and each routed one (`hermes -p <name> config set ...`), with your contacts' language:
+
+```bash
+hermes config set stt.enabled true
+hermes config set stt.provider local          # explicit, so Hermes never falls back to a cloud STT
+hermes config set stt.local.model base        # ~150 MB, fine on CPU
+hermes config set stt.language ru             # Hermes assumes "en" otherwise; "" = auto-detect
+hermes config set stt.echo_transcripts false  # else every transcript is posted back to the contact from your account
+```
+
+Then select **Local Whisper** under Speech-to-Text in `hermes tools` to install faster-whisper now. Without it, Hermes installs it on the first voice message, which may need one more gateway restart.
 
 Add to `~/.hermes/.env`:
 
