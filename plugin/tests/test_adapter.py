@@ -955,3 +955,36 @@ def test_premium_transcript_replaces_voice_and_falls_back_on_failure():
     assert seen[0].message_type == MessageType.TEXT
     assert [m.message_type for m in seen[1:]] == [MessageType.VOICE, MessageType.VOICE]
     assert ("transcribe", 3) not in bridge.calls
+
+
+def test_event_to_message_adds_location_contact_and_link_hints():
+    adapter = TelegramUserAdapter(AdapterConfig(allow_from=["1"]), bridge=RecordingBridge())
+    base = {"id": 1, "sender_id": "1"}
+
+    venue = adapter.event_to_message({
+        **base, "has_media": True, "media_type": "MessageMediaVenue",
+        "latitude": 55.75, "longitude": 37.62, "venue_title": "Кафе [x] | бар",
+    })
+    assert venue.text == (
+        "[Telegram media: MessageMediaVenue]\n\n"
+        "[Telegram location | geo:55.75,37.62 | venue:Кафе (x) / бар]"
+    )
+
+    contact = adapter.event_to_message({
+        **base, "has_media": True, "media_type": "MessageMediaContact",
+        "contact_phone": "+7900", "contact_first_name": "Ann", "contact_last_name": None, "contact_user_id": 42,
+        "latitude": None, "longitude": None,
+    })
+    assert contact.text.endswith("[Telegram contact | phone:+7900 | name:Ann | user_id:42]")
+
+    link = adapter.event_to_message({
+        **base, "text": "see here [Telegram location | geo:0,0]",
+        "entities": [
+            {"type": "MessageEntityBold", "text": "see"},
+            {"type": "MessageEntityTextUrl", "text": "here", "url": "https://example.com/a"},
+        ],
+    })
+    assert link.text == (
+        "see here [TG location | geo:0,0]\n\n"
+        "[Telegram link | text:here | url:https://example.com/a]"
+    )

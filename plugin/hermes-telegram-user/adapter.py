@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import logging
 import os
+import re
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -247,6 +248,40 @@ def _normalize_peer_key(value: Any) -> str:
         except ValueError:
             return text
     return text.lower()
+
+
+def _hint_value(value: Any) -> str:
+    """Keep a sender-controlled value from breaking out of its ``[... | ...]`` hint."""
+    if value is None:
+        return ""
+    return " ".join(str(value).replace("|", "/").replace("[", "(").replace("]", ")").split())
+
+
+def _inbound_hints(event: dict[str, Any]) -> list[str]:
+    """Location, contact and hidden-link details the message text alone does not carry."""
+    hints: list[str] = []
+    lat, lon = event.get("latitude"), event.get("longitude")
+    geo = [f"geo:{lat},{lon}"] if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else []
+    geo += [f"{label}:{v}" for key, label in (("venue_title", "venue"), ("venue_address", "address"))
+            if (v := _hint_value(event.get(key)))]
+    if geo:
+        hints.append("[Telegram location | " + " | ".join(geo) + "]")
+
+    name = _hint_value(f"{event.get('contact_first_name') or ''} {event.get('contact_last_name') or ''}")
+    contact = [f"{label}:{v}" for label, v in (
+        ("phone", _hint_value(event.get("contact_phone"))),
+        ("name", name),
+        ("user_id", _hint_value(event.get("contact_user_id"))),
+    ) if v]
+    if contact:
+        hints.append("[Telegram contact | " + " | ".join(contact) + "]")
+
+    entities = event.get("entities")
+    for entity in entities if isinstance(entities, list) else []:
+        if isinstance(entity, dict) and entity.get("type") == "MessageEntityTextUrl":
+            if url := _hint_value(entity.get("url")):
+                hints.append(f"[Telegram link | text:{_hint_value(entity.get('text'))} | url:{url}]")
+    return hints
 
 
 @dataclass(frozen=True)
@@ -516,10 +551,13 @@ class TelegramUserAdapter(BasePlatformAdapter):
         return MessageType.DOCUMENT
 
     def event_to_message(self, event: dict[str, Any]) -> MessageEvent:
-        text = str(event.get("text") or "")
+        # A sender must not be able to type a fake "[Telegram ...]" hint.
+        text = re.sub(r"\[Telegram\s", "[TG ", str(event.get("text") or ""), flags=re.IGNORECASE)
         if not text and event.get("has_media"):
             media_type = event.get("media_type") or "unknown"
             text = f"[Telegram media: {media_type}]"
+        if hints := _inbound_hints(event):
+            text = "\n\n".join(filter(None, [text, "\n".join(hints)]))
 
         sender_id = str(event.get("sender_id", ""))
         sender_name = event.get("sender_name")
