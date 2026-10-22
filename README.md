@@ -57,7 +57,7 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 
 | Component | Supported |
 |---|---|
-| Hermes Agent | v0.22.x (tested on v0.22.4); Hermes itself needs Python 3.11–3.14 |
+| Hermes Agent | v0.22.4 or newer (older v0.22.x lack `allowlist_suppresses_pairing`); Hermes itself needs Python 3.11–3.14 |
 | Backend | Python 3.11–3.14 (CI tests both ends, with the oldest and newest allowed dependencies), Telethon 1.45.x, FastAPI ≥ 0.133, Starlette ≥ 1.3.1 |
 | OS | Linux with systemd for the documented deployment; the backend itself runs anywhere Python does |
 
