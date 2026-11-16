@@ -214,7 +214,7 @@ sudo sh /opt/hermes-tg-bridge/deploy/update-bridge.sh rollback /opt/hermes-tg-br
 ```bash
 P="$HOME/.hermes/plugins/hermes-telegram-user"; PB="$HOME/.hermes/backups/plugin-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$HOME/.hermes/backups" && mv "$P" "$PB" && cp -r /opt/hermes-tg-bridge/plugin/hermes-telegram-user "$P"
-hermes plugins doctor 2>&1 | grep -i -A3 telegram
+hermes plugins doctor hermes-telegram-user
 ```
 
 Plugin rollback: `mv "$P" "$PB.failed" && mv "$PB" "$P"`, then `/restart`.

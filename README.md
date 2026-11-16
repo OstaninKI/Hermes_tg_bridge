@@ -220,11 +220,16 @@ Environment variables override `gateway.platforms.telegram_user.extra` in Hermes
 | `HERMES_TG_POLICY_PROFILE` | `dm_inbox` | Backend policy profile |
 | `HERMES_TG_ALLOWED_USERS` | — | Comma-separated ids/usernames Hermes accepts (also Hermes' own user allowlist) |
 | `HERMES_TG_ALLOW_ALL_USERS` | `false` | Accept every sender the backend lets through (dev only) |
+| `HERMES_TG_WRITE_TO` | same as `HERMES_TG_ALLOWED_USERS` | Comma-separated ids/usernames the plugin asks the backend to allow sends to. Set but empty means no one |
+| `HERMES_TG_DENY_FROM` | — | Comma-separated ids/usernames whose DMs the backend must not deliver |
+| `HERMES_TG_DENY_WRITE_TO` | — | Comma-separated ids/usernames the backend must not send to |
 | `HERMES_TG_HOME_CHANNEL` | — | Chat for cron `deliver=telegram_user` |
 | `HERMES_TG_MARK_READ_ON_INBOUND` | `true` | Mark DMs read once Hermes accepts them |
 | `HERMES_TG_TYPING_WHILE_REPLYING` | `true` | Show "typing…" while Hermes works |
 | `HERMES_TG_POLL_TIMEOUT_MS` | `25000` | Long-poll timeout |
 | `HERMES_TG_POLL_INTERVAL_MS` | `1500` | Pause between polls |
+
+The allow and deny lists travel to the backend as request headers. The backend intersects them with its own policy, so they can narrow it but never widen it.
 
 ### Cron delivery
 
@@ -238,7 +243,19 @@ All optional; set them in the systemd unit or `secret.env`.
 |---|---|---|
 | `TELEGRAM_MAX_SENDS_PER_MIN` | `25` | Hard cap on outgoing sends per process (runaway-agent fuse); a message split into N parts costs N |
 | `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` | `30` | Longest FloodWait the backend sleeps through before returning `429 Retry-After` |
+| `TELEGRAM_BRIDGE_LISTEN` | `127.0.0.1:8765` | `host:port` the backend listens on; `run --host/--port` override it |
+| `TELEGRAM_SESSION_STRING` | — | Telethon `StringSession` used instead of the `TELEGRAM_SESSION_PATH` file; wins when both are set |
+| `TELEGRAM_PHONE` | — | Phone number for the interactive `hermes-tg-bridge auth` login, instead of the prompt |
+| `TELEGRAM_POLICY_DEFAULT_PROFILE` | — | Policy profile for requests that name none; unset means the policy file's `defaults` only |
+| `TELEGRAM_ALLOW_CHAT_IDS` / `TELEGRAM_DENY_CHAT_IDS` | — | Comma-separated read allow/deny lists, used only where the policy file sets no `read.allow` / `read.deny` |
+| `TELEGRAM_WRITE_ALLOW_CHAT_IDS` / `TELEGRAM_WRITE_DENY_CHAT_IDS` | — | The same for sends, used only where the policy file sets no `write.allow` / `write.deny` |
 | `TELEGRAM_REPLY_DELAY_SEC` | `2` | Pause before each outgoing send; `0` is honoured |
+| `TELEGRAM_REPLY_DELAY_MAX_SEC` | — | When larger than `TELEGRAM_REPLY_DELAY_SEC`, each pause is a random value between the two |
+| `TELEGRAM_RPC_TIMEOUT_SEC` | `30` | Timeout of a single Telegram API call (minimum `1`) |
+| `TELEGRAM_DM_AUTO_DOWNLOAD_MEDIA` | `true` | Download inbound attachments so the agent can open them; `false` delivers the messages without the files |
+| `TELEGRAM_FILE_UPLOAD_ROOTS` | the inbound media directory | Comma-separated directories `/send_file`, `/send_voice` and `/send_sticker` may read from (extended API) |
+| `TELEGRAM_SOURCES_REFRESH_SEC` | `300` | How long the dialog inventory behind `/sources` is reused before a refresh (extended API) |
+| `TELEGRAM_SOURCES_DIALOG_LIMIT` | `500` | Dialogs read per inventory refresh, clamped to 50–2000 (extended API) |
 | `TELEGRAM_IDEMPOTENCY_TTL_SEC` | `600` | Lifetime of the send idempotency cache |
 | `TELEGRAM_IDEMPOTENCY_MAX_KEYS` | `1000` | Size of the send idempotency cache |
 | `TELEGRAM_DM_INBOX_BACKFILL` | `unread` | Messages from before the first start: `unread`, `none` (only new), `all` (recent history) |
@@ -247,7 +264,7 @@ All optional; set them in the systemd unit or `secret.env`.
 | `TELEGRAM_DISABLE_EXTENDED_API` | off | `1` keeps only the endpoints the gateway needs (`/health`, `/me`, `/send_message`, `/dm/*`, `/transcribe_voice`, `/auth/qr/*`); the rest return `404` |
 | `TELEGRAM_PROXY_TYPE` / `_HOST` / `_PORT` / `_SECRET` | — | `socks5` (needs the `[proxy]` extra) or `mtproxy` connection to Telegram. A wrong type or missing host/port stops the backend from starting; it never falls back to a direct connection |
 
-State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/telethon` if that is unset. Override them with `TELEGRAM_SESSION_PATH`, `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_DM_MEDIA_PATH` and `TELEGRAM_LOCK_PATH`, as the example unit does.
+State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/telethon` if that is unset. Override them with `TELEGRAM_INBOX_STATE_PATH`, `TELEGRAM_SOURCES_INVENTORY_PATH`, `TELEGRAM_DM_MEDIA_PATH` and `TELEGRAM_LOCK_PATH`, as the example unit does. The session file has no default: without `TELEGRAM_SESSION_PATH` (or a `TELEGRAM_SESSION_STRING`) the backend does not start.
 
 ## Safety
 

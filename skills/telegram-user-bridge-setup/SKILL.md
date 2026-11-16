@@ -271,7 +271,7 @@ Add these to `$HH/.env`, replacing existing keys rather than duplicating them, a
 
 Then clean up with `rm -f /tmp/tg-bridge-token "$H"`.
 
-**New profiles**, from the table: `hermes profile create <name>` **without `--clone`**. A clone copies the user's memory, persona and the whole `.env` (other channels' tokens too); none of that may reach a contact's profile. Then give the empty profile only what it needs to answer:
+**New profiles**, from the table: `hermes profile create <name> --no-credentials`, **without `--clone`**. A clone copies the user's memory, persona and every provider key in `.env`; a plain create without `--no-credentials` still copies the `.env` keys and the model. None of that may reach a contact's profile. The default profile's logins (`auth.json`) stay readable for any provider the new profile has not signed in to itself. Then give the empty profile only what it needs to answer:
 - **Model:** use Hermes' own command for a profile's model if it has one (`hermes -p <name> ...`). Otherwise copy only the model/provider section of `~/.hermes/config.yaml` into `~/.hermes/profiles/<name>/config.yaml`.
 - **Provider key:** only the key that model needs. Copy that one line from `~/.hermes/.env` into `~/.hermes/profiles/<name>/.env` (mode 0600) by redirection, never echoed. No bot tokens and no `HERMES_TG_*` keys.
 - **Persona:** write `~/.hermes/profiles/<name>/SOUL.md` from the answer in step 1.

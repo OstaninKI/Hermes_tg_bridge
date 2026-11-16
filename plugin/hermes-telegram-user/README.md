@@ -18,6 +18,9 @@ Connects Hermes to a live Telegram user account through the `hermes-tg-bridge` b
 - `HERMES_TG_POLICY_PROFILE`: backend policy profile, default `dm_inbox`;
 - `HERMES_TG_ALLOWED_USERS`: comma-separated Telegram ids/usernames allowed to reach the agent;
 - `HERMES_TG_ALLOW_ALL_USERS`: `true`/`false`, default `false`;
+- `HERMES_TG_WRITE_TO`: comma-separated ids/usernames the backend may send to, default the same list as `HERMES_TG_ALLOWED_USERS`; set but empty means no one;
+- `HERMES_TG_DENY_FROM`: comma-separated ids/usernames whose DMs the backend must not deliver;
+- `HERMES_TG_DENY_WRITE_TO`: comma-separated ids/usernames the backend must not send to;
 - `HERMES_TG_HOME_CHANNEL`: Telegram id/username for cron `deliver=telegram_user`;
 - `HERMES_TG_MARK_READ_ON_INBOUND`: `true`/`false`, default `true`;
 - `HERMES_TG_TYPING_WHILE_REPLYING`: `true`/`false`, default `true`;
@@ -38,7 +41,7 @@ When no gateway runs in the same process (`hermes cron`), the plugin sends direc
 
 Hermes discovers a directory plugin by its `plugin.yaml` manifest. It imports the directory as the package `hermes_plugins.<slug>` and calls `register(ctx)` from `__init__.py`.
 
-1. Copy this directory to `~/.hermes/plugins/hermes-telegram-user/` (or `./.hermes/plugins/`), keeping `plugin.yaml`, `__init__.py` and `adapter.py`.
+1. Copy this directory to `~/.hermes/plugins/hermes-telegram-user/`, keeping `plugin.yaml`, `__init__.py` and `adapter.py`.
 2. Run `hermes plugins enable hermes-telegram-user`.
 
 The import in `__init__.py` must stay relative (`from .adapter import register`). An absolute `from adapter import ...` does not resolve from the package context Hermes loads the plugin in.
