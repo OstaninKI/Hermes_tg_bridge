@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-maintenance
 description: "Check and debug hermes-tg-bridge around a Hermes update, or when the Telegram user bridge misbehaves: no replies, a reply from the wrong profile, lost settings, cron results not delivered. Backup before, checklist after, where to look in the logs."
-version: 1.0.4
+version: 1.1.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -82,7 +82,7 @@ grep -h "telegram_user" "$HOME/.hermes/logs/"*.log | grep -i "startup\|API chang
 - `API changed, plugin needs an update`: the update renamed or removed something the plugin uses. The plugin refuses to load on purpose. Tell the user; the fix is a plugin update or a Hermes rollback.
 - No `startup` line since the restart: the plugin did not start. Check `hermes plugins list` and the gateway log around the restart.
 - Compare the new `startup` line with `$B/startup-line.txt` field by field. Any change in `hermes_home`, `token_set`, `allowed_users`, `allow_all`, `home_channel`, `policy`, `mark_read` or `typing`, other than `hermes=`, means Hermes now loads config or `.env` differently. Show the user the diff. `home_channel=none` alone is normal when cron jobs name their own recipients (for example per profile): the plugin cannot see those.
-- Also diff the configs: `diff "$B/config.yaml" "$HOME/.hermes/config.yaml"`, especially `gateway.multiplex_profiles`, `gateway.profile_routes`, `stt.echo_transcripts` (must stay `false`, or voice transcripts go back to contacts from the user's account), `stt.provider` (`local`) and `stt.language` and the settings that control quiet mode and intermediate messages.
+- Also diff the configs: `diff "$B/config.yaml" "$HOME/.hermes/config.yaml"`, especially `gateway.multiplex_profiles`, `gateway.profile_routes`, `platform_toolsets.telegram_user` and `allow_admin_from` (see [Access control](#4-access-control)), `stt.echo_transcripts` (must stay `false`, or voice transcripts go back to contacts from the user's account), `stt.provider` (`local`) and `stt.language` and the settings that control quiet mode and intermediate messages.
 
 ### 3. Routing: each contact lands in its profile
 
@@ -138,6 +138,20 @@ grep -h "\[telegram_user\]" "$HOME/.hermes/logs/"*.log | grep -i "not in allow_f
 
 - An allowed contact shows `dropping message ... not in allow_from`: the allowlist did not load (compare `allowed_users=` in the startup line).
 - Any line about a **pairing code being sent** to a Telegram user: stop and tell the user immediately. Pairing codes must never go out from their personal account (`allowlist_suppresses_pairing`).
+
+**What contacts may do.** For `default` and every profile in the state file:
+
+```bash
+for p in default <profiles from the state file>; do
+  echo "== $p"; hermes -p "$p" config get platform_toolsets.telegram_user
+  hermes -p "$p" tools list --platform telegram_user | grep -F '✓'
+done
+hermes config get gateway.platforms.telegram_user.extra.allow_admin_from
+```
+
+- Each profile must show an explicit list matching the access in the state file, with `no_mcp` unless the user chose MCP servers. An empty or missing value means that profile hands contacts its full toolset, including the terminal: tell the user and apply the access part of the setup skill's step 7.
+- `terminal`, `file`, `browser` or `code_execution` enabled for a profile whose access is `chat` or `chat + web`: same.
+- No `allow_admin_from`: every contact can run `/update`, `/restart` and `/approve` through the user's account. Apply the slash-command part of step 7.
 
 ### 5. Cron delivery
 
@@ -220,5 +234,7 @@ hermes plugins doctor hermes-telegram-user
 Plugin rollback: `mv "$P" "$PB.failed" && mv "$PB" "$P"`, then `/restart`.
 
 Installs from before these settings existed may post voice transcripts back to contacts, or have no speech-to-text when Telegram Premium is unavailable. For the default profile and every routed one, `hermes -p <profile> config get` each of `stt.echo_transcripts` (`false`), `stt.provider` (`local`) and `stt.language` (the contacts' language; Hermes defaults to `en`). Anything missing: apply the speech-to-text block of the setup skill's step 7, faster-whisper install included.
+
+Installs from before setup skill 1.5.0 give contacts the full toolset and every slash command. Run the "What contacts may do" check in [Access control](#4-access-control); if access is not recorded in the state file, ask the user per profile (setup skill, step 1) before setting it.
 
 **4.** The user sends `/restart`, and you run [After a Hermes update](#after-a-hermes-update-or-a-restart). Once everything passes, tell the user which old copies they can remove themselves after a few days: `/opt/hermes-tg-bridge.bak-*`, `/opt/hermes-tg-bridge.failed-*`, the plugin backup and `$T`.

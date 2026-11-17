@@ -50,7 +50,7 @@ Telegram  ⇄  backend (Telethon, 127.0.0.1:8765)  ⇄  Hermes plugin "telegram_
 - **`backend/`**: an HTTP service built on FastAPI and Telethon. It owns the Telegram session and enforces the access policy: who may write to the agent and who the agent may write to.
 - **`plugin/hermes-telegram-user/`**: the Hermes platform plugin. It polls the backend for DMs and sends replies back.
 - **`skills/telegram-user-bridge-setup/`**: a Hermes skill that lets the agent install all of this for you over chat (see [Agent-assisted install](#agent-assisted-install)).
-- **`skills/telegram-user-bridge-maintenance/`**: a Hermes skill for Hermes updates and debugging: backup before, a checklist after (plugin loaded, settings unchanged, each contact in its profile, cron delivery), and what each log line means.
+- **`skills/telegram-user-bridge-maintenance/`**: a Hermes skill for Hermes updates and debugging: backup before, a checklist after (plugin loaded, settings unchanged, each contact in its profile with its access, cron delivery), and what each log line means.
 - **`deploy/`**: example systemd unit, backend policy and Hermes config, and `update-bridge.sh`, which updates the backend from a GitHub archive with automatic rollback.
 - **`create_telethon_session.sh`**: an interactive login helper, if you prefer creating the session by hand.
 
@@ -80,7 +80,7 @@ Then send `/telegram-user-bridge-setup` in your chat with Hermes.
 
 Before and after each Hermes update, use the maintenance skill. Install it the same way (`.../skills/telegram-user-bridge-maintenance/SKILL.md`) and send `/telegram-user-bridge-maintenance`.
 
-Before installing, the agent asks which Hermes [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) should answer each allowed contact. One bridge and one plugin serve them all: `gateway.profile_routes` sends each contact to their own profile, with its own memory and persona, while senders outside the allowlist are ignored. It keeps its progress and your answers in `~/.hermes/tg-bridge-setup.md` (no secrets), so it picks up where it left off after each restart.
+Before installing, the agent asks which Hermes [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) should answer each allowed contact. One bridge and one plugin serve them all: `gateway.profile_routes` sends each contact to their own profile, with its own memory and persona, while senders outside the allowlist are ignored. It also asks what each profile may do for contacts (chat only, chat and web, or tools you name) and limits it to that (see [What contacts may do](#what-contacts-may-do)). It keeps its progress and your answers in `~/.hermes/tg-bridge-setup.md` (no secrets), so it picks up where it left off after each restart.
 
 The agent needs the **local** terminal backend (commands must run on the Hermes host, not in a sandbox) and passwordless `sudo` for the system-service layout. Without passwordless `sudo` it asks you to run the few root commands yourself.
 
@@ -198,6 +198,8 @@ HERMES_TG_ALLOWED_USERS=123456789,@friend
 HERMES_TG_HOME_CHANNEL=123456789
 ```
 
+Then limit what contacts may do; see [What contacts may do](#what-contacts-may-do). Without it they get the profile's full toolset, terminal included.
+
 ### 7. Restart Hermes and test
 
 ```bash
@@ -230,6 +232,29 @@ Environment variables override `gateway.platforms.telegram_user.extra` in Hermes
 | `HERMES_TG_POLL_INTERVAL_MS` | `1500` | Pause between polls |
 
 The allow and deny lists travel to the backend as request headers. The backend intersects them with its own policy, so they can narrow it but never widen it.
+
+### What contacts may do
+
+Hermes gives every sender the full toolset of the profile that answers them, unless the profile sets one for the platform. Profiles are not sandboxes: a contact whose profile has the terminal or file tools can ask the agent to read your own `~/.hermes`. A line in `SOUL.md` saying what the agent must not do is no limit. Set the list for `default` and every profile routed from `telegram_user`; it applies only to this platform, so your own bot keeps its tools:
+
+```bash
+hermes -p <profile> config set platform_toolsets.telegram_user '[memory, session_search, no_mcp]'        # chat only
+hermes -p <profile> config set platform_toolsets.telegram_user '[memory, session_search, web, no_mcp]'   # chat and web
+hermes -p <profile> tools list --platform telegram_user                                                  # check
+```
+
+Keep `no_mcp` unless you list MCP servers by name: any explicit list without it still enables every MCP server of the profile. Contacts who share a profile share its access.
+
+Hermes' slash commands are open to every allowed sender until an admin list exists. Make your own Telegram id the only admin, so contacts keep just `/help` and `/whoami` and cannot run `/update`, `/restart` or answer `/approve`:
+
+```yaml
+gateway:
+  platforms:
+    telegram_user:
+      extra:
+        allow_admin_from: ["<your-telegram-user-id>"]
+        user_allowed_commands: []
+```
 
 ### Cron delivery
 
@@ -272,6 +297,7 @@ State paths default to the directory of `TELEGRAM_POLICY_PATH`, or `~/.hermes/te
 - **Access policy:**
   - Read and write allowlists live in the backend policy. The plugin's `X-Hermes-Allow-From` / `X-Hermes-Write-To` headers can only **narrow** them (intersection), never widen them.
   - With `HERMES_TG_ALLOWED_USERS` set, Hermes never sends pairing codes to strangers from your personal account.
+  - What an allowed contact can make the agent do is set in Hermes, per profile: see [What contacts may do](#what-contacts-may-do).
 - **Send limits:** an app-level rate limit (`TELEGRAM_MAX_SENDS_PER_MIN`) sits on top of FloodWait handling.
 - **Session:** the Telegram session is stored in a directory only the backend's service user can read.
 

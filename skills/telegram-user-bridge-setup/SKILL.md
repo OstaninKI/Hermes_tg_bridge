@@ -1,7 +1,7 @@
 ---
 name: telegram-user-bridge-setup
 description: "Install hermes-tg-bridge so Hermes can talk through the user's own Telegram account: backend service, QR login, plugin, restart. Walks the user through the steps only they can do."
-version: 1.4.4
+version: 1.5.0
 author: OstaninKI
 license: MIT
 platforms: [linux]
@@ -27,6 +27,7 @@ You are installing [hermes-tg-bridge](https://github.com/OstaninKI/Hermes_tg_bri
 - **Talk to the user in their language.** The quoted prompts below are templates; translate them.
 - **Keep a state file and resume from it.** This install spans several restarts, and you lose your context and shell variables on each one. See [State file](#state-file).
 - **Never guess which Hermes profile answers whom.** Ask in step 1. A contact without a route lands in the default profile, the one that usually runs the user's bot.
+- **Never give contacts more tools than the user chose.** Without an explicit `platform_toolsets.telegram_user`, a profile hands every contact its full toolset: the terminal, files, browser and MCP servers. Profiles are not sandboxes, so a contact with a terminal can read the user's own `~/.hermes`. A "must not do" line in `SOUL.md` is a wish, not a limit: the access list is the limit.
 
 ## State file
 
@@ -41,17 +42,17 @@ Format:
 
 ```markdown
 # hermes-tg-bridge setup state
-skill_version: 1.4.4
+skill_version: 1.5.0
 updated: <ISO date>
 last_step_done: <0..8>
 hermes_user: <id -un>
 current_profile: <profile this chat runs in, "default" for ~/.hermes>
 sudo: yes | no
-linked_account: <name/@username after step 6>
+linked_account: <name/@username and numeric id after step 6>
 
 ## Profiles
-| contact (numeric id) | label | Hermes profile | new profile? | status |
-|---|---|---|---|---|
+| contact (numeric id) | label | Hermes profile | new profile? | access | status |
+|---|---|---|---|---|---|
 
 home_channel: <id or none>
 
@@ -113,6 +114,25 @@ Ask:
   > "How should the agent behave with `<contact>` (tone, role, anything it must know or must not do)? I'll write that as the new profile's persona."
 
   Copy the user's memory into a contact's profile only if the user asks for it on their own. Then first warn them: "`<contact>` will be able to ask the agent about anything in your memory." Record their answer as a decision.
+
+Then ask, per profile (contacts who share a profile share its access):
+
+> "What may the agent do for the people on `<profile>`?
+> - **chat** (recommended): talk, remember them, recall past chats. No internet, no files, no commands.
+> - **chat + web**: the same, plus web search and reading web pages.
+> - **custom**: you name the tools.
+>
+> Whatever you pick applies only to messages through your Telegram account; your own bot keeps its tools."
+
+**Wait.** The presets, as `platform_toolsets.telegram_user` values:
+
+| Access | Value |
+|---|---|
+| chat | `[memory, session_search, no_mcp]` |
+| chat + web | `[memory, session_search, web, no_mcp]` |
+| custom | the toolsets the user names (`hermes tools list --platform telegram_user` shows them), plus `no_mcp` unless they name MCP servers |
+
+Keep `no_mcp` in every list unless the user names MCP servers: without it, an explicit list still hands contacts every MCP server the profile has enabled. If a custom list includes `terminal`, `file`, `browser`, `code_execution`, `computer_use`, `cronjob`, `delegation` or `skills`, first warn: "That lets `<contact>` run commands or change files on this server, including your own Hermes data and memory, by asking the agent." Record the answer as a decision. If two contacts on one profile need different access, they need different profiles.
 
 Optionally ask:
 
@@ -249,7 +269,7 @@ curl -s http://127.0.0.1:8765/health          # {"status":"ok","connected":true}
 curl -s -H @"$H" http://127.0.0.1:8765/me     # the user's account
 ```
 
-Tell the user which account is linked (name/@username from `/me`) and that a new linked device now appears in Telegram → Settings → Devices; terminating it there cuts the bridge off.
+Tell the user which account is linked (name/@username from `/me`; record its numeric `id` too, step 7 needs it) and that a new linked device now appears in Telegram → Settings → Devices; terminating it there cuts the bridge off.
 
 ## Step 7. Plugin, profiles and routes (no user action)
 
@@ -291,6 +311,28 @@ gateway:
 ```
 
 Re-read the file to check it is valid YAML and that each `profile` exists. Mark each contact `routed` in the state file.
+
+**Access.** Set the access chosen in step 1 for every routed profile, and always for `default` too: it answers any allowed sender without a route, so it gets `chat` unless contacts are routed to it with other access. The key only covers the `telegram_user` platform; the user's own bot and CLI keep their tools.
+
+```bash
+hermes -p <profile> config set platform_toolsets.telegram_user '[memory, session_search, no_mcp]'   # value from the step 1 table
+hermes -p <profile> tools list --platform telegram_user                                             # ✓ only on the chosen toolsets
+```
+
+Voice messages keep working with any preset: inbound speech-to-text follows `stt.*`, not this list.
+
+**Slash commands.** Without an admin list, every contact can run every gateway command (`/update`, `/restart`, `/approve`, …) through the user's account. In `$HH/config.yaml`, under `gateway.platforms.telegram_user.extra`, add the linked account's numeric id from step 6 as the only admin:
+
+```yaml
+gateway:
+  platforms:
+    telegram_user:
+      extra:
+        allow_admin_from: ["<linked account id>"]
+        user_allowed_commands: []
+```
+
+Contacts then keep only `/help` and `/whoami`, and cannot answer dangerous-command approvals either. Add commands to `user_allowed_commands` (for example `new`) only if the user asks. Record the access per contact in the state file.
 
 **Speech-to-text.** Voice messages and video circles are transcribed by Telegram when the account has Premium. Without Premium, or when Telegram fails, the plugin hands the audio to Hermes, so Hermes needs its own speech-to-text: local faster-whisper, offline, no API key, no audio sent anywhere. In the default profile and every routed one (`<lang>` from step 1, e.g. `ru`):
 
@@ -335,14 +377,15 @@ grep -i "telegram_user\|Telegram User\|profile_route" "$HOME/.hermes/logs/"*.log
 
 Look for the platform being connected and for no `bridge_unauthorized` or `bridge_unavailable` errors. Then:
 
-> "Ask one contact per profile to send a DM to your account. Each should get a reply from your account within a few seconds, from the agent of their profile. Ask one of them to also send a short voice message: the reply should answer what they said."
+> "Ask one contact per profile to send a DM to your account. Each should get a reply from your account within a few seconds, from the agent of their profile. Ask one of them to also send a short voice message: the reply should answer what they said. Ask one with `chat` access to send `/update`: it must be refused as admin-only."
 
 **Wait** for confirmation. On failure:
 - a voice message answered as if not understood: `grep -i "transcri\|whisper" "$HOME/.hermes/logs/"*.log | tail`, then `stt.provider`, `stt.language` and faster-whisper from step 7;
 - `journalctl -u hermes-tg-bridge -n 50`;
 - the Hermes logs;
 - whether the sender's id is in both `policy.json` and `HERMES_TG_ALLOWED_USERS`;
-- for a reply from the wrong agent: the sender's `user_id` in `profile_routes`, and the gateway log line for that route.
+- for a reply from the wrong agent: the sender's `user_id` in `profile_routes`, and the gateway log line for that route;
+- `/update` not refused: `allow_admin_from` under `gateway.platforms.telegram_user.extra` in `$HH/config.yaml`.
 
 ## Done
 
@@ -350,12 +393,12 @@ Set `last_step_done: 8` in the state file and keep the file: it records the layo
 
 Summarize for the user:
 - the linked account;
-- each contact with its profile;
+- each contact with its profile and access;
 - the cron home channel, if any.
 
 Also tell them how to change and how to remove things:
-- **Adding contacts or moving them between profiles:** ask me to run this skill again; I'll read the state file and only redo steps 1, 4 (policy), 7 and 8.
-- **By hand:** a new contact goes into `/etc/hermes-tg-bridge/policy.json`, `HERMES_TG_ALLOWED_USERS` in `~/.hermes/.env` and, for a non-default profile, `gateway.profile_routes` in `~/.hermes/config.yaml`. Then `sudo systemctl restart hermes-tg-bridge` and `/restart`.
+- **Adding contacts, moving them between profiles or changing their access:** ask me to run this skill again; I'll read the state file and only redo steps 1, 4 (policy), 7 and 8.
+- **By hand:** a new contact goes into `/etc/hermes-tg-bridge/policy.json`, `HERMES_TG_ALLOWED_USERS` in `~/.hermes/.env` and, for a non-default profile, `gateway.profile_routes` in `~/.hermes/config.yaml`; a new profile also needs `platform_toolsets.telegram_user`. Then `sudo systemctl restart hermes-tg-bridge` and `/restart`.
 - **Unlinking:** terminate the session in Telegram → Settings → Devices, and/or run `sudo systemctl disable --now hermes-tg-bridge`.
 - **Hermes updates:** before and after each one, run the `telegram-user-bridge-maintenance` skill (same repository, `skills/telegram-user-bridge-maintenance/SKILL.md`). It backs up state and checks that every contact still reaches its profile. Offer to install it now.
 - **Uninstalling:** also remove `/opt/hermes-tg-bridge`, `/etc/hermes-tg-bridge`, `/var/lib/hermes-tg-bridge*`, `~/.hermes/plugins/hermes-telegram-user`, the `tg-user-*` entries in `profile_routes`, and `~/.hermes/tg-bridge-setup.md`.

@@ -6,6 +6,11 @@ plugins:
   enabled:
     - hermes-telegram-user
 
+# What contacts may make the agent do (README: "What contacts may do"). Unset means
+# the profile's full toolset, terminal included. Set it in every routed profile too.
+platform_toolsets:
+  telegram_user: [memory, session_search, no_mcp]
+
 gateway:
   platforms:
     telegram_user:
@@ -26,6 +31,9 @@ gateway:
         # These only narrow the backend policy; they cannot widen it.
         allow_from: ["<your-telegram-user-id>"]
         write_to: ["<your-telegram-user-id>"]
+        # Hermes slash commands: only you are admin; contacts keep /help and /whoami.
+        allow_admin_from: ["<your-telegram-user-id>"]
+        user_allowed_commands: []
         mark_read_on_inbound: true
         typing_while_replying: true
         poll_timeout_ms: 25000
